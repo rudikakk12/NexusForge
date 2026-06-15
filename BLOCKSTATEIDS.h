@@ -1,0 +1,11 @@
+//
+// Created by Rick on 2026. 06. 12..
+//
+
+#ifndef NEXUSFORGE_BLOCKSTATEIDS_H
+#define NEXUSFORGE_BLOCKSTATEIDS_H
+
+typedef
+
+
+#endif //NEXUSFORGE_BLOCKSTATEIDS_H
