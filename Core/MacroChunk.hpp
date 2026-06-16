@@ -70,7 +70,6 @@ namespace NF::Core {
     #pragma pack(pop)
 
     // Az egységesített, végleges Aréna kategóriák:
-    using Macrochunk_Wilderness  = MacroChunk<uint8_t, 128>;
     using Macrochunk_SmallBase  = MacroChunk<uint8_t, 256>;// ~78 KB
     using Macrochunk_NormalBase  = MacroChunk<uint16_t, 1024>; // ~118 KB -- át kellene írni valahogy 10bitre.
     using Macrochunk_HeavyModded = MacroChunk<uint16_t, 8192>; // ~238 KB
@@ -81,13 +80,17 @@ namespace NF::Core {
     template<typename IndexType, size_t MaxPaletteSize>
     bool CheckMacroChunkPalette(MacroChunk<IndexType, MaxPaletteSize> & chunk) {
 
-        bool IsInPalette = false;
+        uint64_t TempPaletteMask[MaxPaletteSize/64];
 
         for (uint32_t i = 0; i < 32768; ++i) {
-
+            TempPaletteMask[chunk.tickNow[i]] = true;
             }
-        return true;
+
+        for (uint32_t i = 0; i < (MaxpaletteSize / 256); ++i) {
+            _mm256_cmpeq_epu64_mask(_mm256_i64gather_epi64(TempPaletteMask, i * 4, 4 ), _mm256_i64gather_epi64(chunk.PaletteMask, i * 4, 4));
         }
+
+    }
 
     }
 
