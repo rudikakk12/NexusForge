@@ -6,16 +6,15 @@
 #include <utility> // ÚJ: std::swap miatt szükséges
 
 // --- KONSTANSOK ---
-constexpr uint32_t FLAG_REJECTED        = 1U << 31;
-constexpr uint32_t FLAG_OVERWRITE_SOLID = 1U << 30;
-
+constexpr uint32_t FLAG_REJECTED                        = 1U << 31;
+constexpr uint32_t FLAG_OVERWRITE_SOLID                 = 1U << 30;
 // Paletta indexek (Szigorú szabály: a 0-s index MINDIG a levegő a chunk palettájában)
 // Ez garantálja, hogy a C++ zero-initialization (vagy egy memset(0)) azonnal levegővel tölti fel a teret.
-constexpr uint8_t  AIR_PALETTE_INDEX_8  = 0;
-constexpr uint16_t AIR_PALETTE_INDEX_16 = 0;
+constexpr uint8_t  AIR_PALETTE_INDEX_8                  = 0;
+constexpr uint16_t AIR_PALETTE_INDEX_16                 = 0;
 
 // Maximum támogatott szálak száma a Trash Bin bufferhez
-constexpr size_t MAX_SUPPORTED_THREADS = 64;
+constexpr size_t MAX_SUPPORTED_THREADS                  = 64;
 
 // --- ÚJ: A GLOBÁLIS FÉNY-MEDENCE (LIGHT POOL) ---
 // Ez spórolja meg a 6.5 GB RAM-ot. Csak az aktív fények kapnak 64KB-ot.

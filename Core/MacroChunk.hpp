@@ -11,6 +11,10 @@
 
 namespace NF::Core {
 
+
+    constexpr uint32_t NEEDS_COMPRESSION_FLAG_SHIFT         = 31;
+
+
     struct MacroChunkCoordinates {
         union {
             uint64_t GridID : 24,
@@ -32,8 +36,7 @@ namespace NF::Core {
         // I. A FEJLÉC (Fix 64 bájt, optimalizálva az L1 Cache-hez és a memóriahatárokhoz)
         // JAVÍTVA: A sorrend úgy lett optimalizálva, hogy pontosan a memóriahatárokra essen
         // és a hasznos adat pontosan 32 bájtot tegyen ki rejtett lyukak nélkül.
-        uint16_t flags               = 0; // 2 bájt (Offset 0. Bit 0 = activeBuffer)
-        uint16_t extraFlags          = 0; // 2 bájt (Offset 2. 15 szabad bit utolsó bit = needs compression)
+        uint32_t flags               = 0; // 2 bájt (Offset 0. Bit 0 = activeBuffer, 31.Bit = )
         uint32_t activePaletteSize   = 0; // 4 bájt (Offset 4)
         uint32_t dirtyPlanesMask     = 0; // 4 bájt (Offset 8)
 
@@ -108,7 +111,7 @@ namespace NF::Core {
             }
 
         IndexType NewPaletteSize = 0;
-        bool NeedsCompression = false;
+        uint32_t NeedsCompression = 0;
 
         for (uint32_t i = 0; i < MaskArraySize; ++i) {
 
@@ -117,9 +120,9 @@ namespace NF::Core {
             chunk.PaletteMask[i] &= TempPaletteMask[i];
             NewPaletteSize += std::popcount(chunk.PaletteMask[i]);
 
-            NeedsCompression = NeedsCompression || OldMask != chunk.PaletteMask[i] ? 1 : 0;
+            NeedsCompression |= (OldMask != chunk.PaletteMask[i]);
         }
-        chunk.extraFlags || (1u << 15) & NeedsCompression;
+        chunk.extraFlags |= NeedsCompression << NEEDS_COMPRESSION_FLAG_SHIFT;
 
         chunk.activePaletteSize = NeedsCompression ? NewPaletteSize : chunk.activePaletteSize;
     }
