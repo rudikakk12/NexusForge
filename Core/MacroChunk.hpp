@@ -7,7 +7,21 @@
 #include <cstdint>
 #include <immintrin.h>
 
+
+
 namespace NF::Core {
+
+    struct MacroChunkCoordinates {
+        union {
+            uint64_t GridID : 24,
+                     X : 8,
+                     Y : 8,
+                     Z : 8,
+                     LocalIndex : 16;
+        };
+
+    };
+
     constexpr size_t MAX_BITPLANES = 8;
     constexpr size_t MAX_COARSE_GRIDS = 4;
 
@@ -19,7 +33,7 @@ namespace NF::Core {
         // JAVÍTVA: A sorrend úgy lett optimalizálva, hogy pontosan a memóriahatárokra essen
         // és a hasznos adat pontosan 32 bájtot tegyen ki rejtett lyukak nélkül.
         uint16_t flags               = 0; // 2 bájt (Offset 0. Bit 0 = activeBuffer)
-        uint16_t extraFlags          = 0; // 2 bájt (Offset 2. 15 szabad bit)
+        uint16_t extraFlags          = 0; // 2 bájt (Offset 2. 15 szabad bit utolsó bit = needs compression)
         uint32_t activePaletteSize   = 0; // 4 bájt (Offset 4)
         uint32_t dirtyPlanesMask     = 0; // 4 bájt (Offset 8)
 
@@ -27,9 +41,11 @@ namespace NF::Core {
         uint32_t lastUpdateTick      = 0; // 4 bájt (Offset 16. Mikor nyúltunk hozzá utoljára?)
         uint32_t lightMapIndex       = 0; // 4 bájt (Offset 20. Mutató a GlobalLightPool-ba)
 
-        int16_t  macroChunkX         = 0; // 2 bájt (Offset 24. Világ koordináták)
-        int16_t  macroChunkY         = 0; // 2 bájt (Offset 26.)
-        int16_t  macroChunkZ         = 0; // 2 bájt (Offset 28.)
+        int8_t  macroChunkX         = 0; // 2 bájt (Offset 24. Világ koordináták)
+        int8_t  macroChunkY         = 0; // 2 bájt (Offset 26.)
+        int8_t  macroChunkZ         = 0; // 2 bájt (Offset 28.)
+        int8_t padding2;
+
 
         uint8_t  chunkState          = 0; // 1 bájt (Offset 30. Enum: 0=Empty, 1=Generating, 2=Ready)
         uint8_t  requiresLightUpdate = 0; // 1 bájt (Offset 31. Scheduler "Kuka" szűrő flag)
@@ -37,7 +53,7 @@ namespace NF::Core {
         // Összesen PONTOSAN 32 bájt a hasznos adat! Nincs többé implicit padding csúszás.
 
         // 64 - 32 = 32 bájt padding a tökéletes L1 Cache igazításhoz! (29-ről 32-re javítva)
-        uint8_t  _padding[32]        = {};
+        uint8_t  _padding[30]        = {};
 
         alignas(32) std::array<uint64_t, MaxPaletteSize/64> PaletteMask         = {};
 
@@ -80,17 +96,35 @@ namespace NF::Core {
     template<typename IndexType, size_t MaxPaletteSize>
     bool CheckMacroChunkPalette(MacroChunk<IndexType, MaxPaletteSize> & chunk) {
 
-        uint64_t TempPaletteMask[MaxPaletteSize/64];
+        constexpr size_t MaskArraySize = MaxPaletteSize / 64;
+        uint64_t TempPaletteMask[MaskArraySize] = {0};
+
+        const IndexType* Voxel = chunk.tickNow;
 
         for (uint32_t i = 0; i < 32768; ++i) {
-            TempPaletteMask[chunk.tickNow[i]] = true;
+            IndexType TempPaletteIndex = Voxel[i];
+
+            TempPaletteMask[TempPaletteIndex >> 6] |= (1ULL << (TempPaletteIndex & 63));
             }
 
-        for (uint32_t i = 0; i < (MaxpaletteSize / 256); ++i) {
-            _mm256_cmpeq_epu64_mask(_mm256_i64gather_epi64(TempPaletteMask, i * 4, 4 ), _mm256_i64gather_epi64(chunk.PaletteMask, i * 4, 4));
-        }
+        IndexType NewPaletteSize = 0;
+        bool NeedsCompression = false;
 
+        for (uint32_t i = 0; i < MaskArraySize; ++i) {
+
+            uint64_t OldMask = chunk.PaletteMask[i];
+
+            chunk.PaletteMask[i] &= TempPaletteMask[i];
+            NewPaletteSize += std::popcount(chunk.PaletteMask[i]);
+
+            NeedsCompression = NeedsCompression || OldMask != chunk.PaletteMask[i] ? 1 : 0;
+        }
+        chunk.extraFlags || (1u << 15) & NeedsCompression;
+
+        chunk.activePaletteSize = NeedsCompression ? NewPaletteSize : chunk.activePaletteSize;
     }
+
+
 
     }
 
