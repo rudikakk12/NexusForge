@@ -30,7 +30,6 @@ namespace NF::Core {
     constexpr size_t MAX_COARSE_GRIDS = 4;
 
     template <typename IndexType, size_t MaxPaletteSize>
-    #pragma pack(push,4)
     struct alignas(64) MacroChunk {
 
         // I. A FEJLÉC (Fix 64 bájt, optimalizálva az L1 Cache-hez és a memóriahatárokhoz)
@@ -86,7 +85,6 @@ namespace NF::Core {
 
         void SwapTickBuffers() { std::swap(tickNow, tickAfter); }
     };
-    #pragma pack(pop)
 
     // Az egységesített, végleges Aréna kategóriák:
     using Macrochunk_SmallBase  = MacroChunk<uint8_t, 256>;// ~78 KB
@@ -125,6 +123,7 @@ namespace NF::Core {
         chunk.extraFlags |= NeedsCompression << NEEDS_COMPRESSION_FLAG_SHIFT;
 
         chunk.activePaletteSize = NeedsCompression ? NewPaletteSize : chunk.activePaletteSize;
+    return true;
     }
 
 

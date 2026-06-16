@@ -30,7 +30,7 @@ namespace NF::Core {
         }
 
         if (!IsInPalette) {
-            if (chunk.activePaletteSize = MaxPaletteSize;) {
+            if (chunk.activePaletteSize = MaxPaletteSize) {
                 std::cout << "Palette Overflow!" << std::endl;
                 return SetBlockResult::Full;
             };

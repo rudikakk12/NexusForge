@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <utility> // ÚJ: std::swap miatt szükséges
+#include "Core/BlockPlacement.hpp"
+#include "Core/MacroChunk.hpp"
 
 // --- KONSTANSOK ---
 constexpr uint32_t FLAG_REJECTED                        = 1U << 31;
@@ -83,69 +85,7 @@ struct alignas(64) GlobalMoveCommand {
 };
 #pragma pack(pop)
 
-constexpr size_t MAX_BITPLANES = 8;
-constexpr size_t MAX_COARSE_GRIDS = 4;
-
-template <typename IndexType, size_t MaxPaletteSize>
-#pragma pack(push,4)
-struct alignas(64) Macrochunk {
-
-    // I. A FEJLÉC (Fix 64 bájt, optimalizálva az L1 Cache-hez és a memóriahatárokhoz)
-    // JAVÍTVA: A sorrend úgy lett optimalizálva, hogy pontosan a memóriahatárokra essen
-    // és a hasznos adat pontosan 32 bájtot tegyen ki rejtett lyukak nélkül.
-    uint16_t flags               = 0; // 2 bájt (Offset 0. Bit 0 = activeBuffer)
-    uint16_t extraFlags          = 0; // 2 bájt (Offset 2. 15 szabad bit)
-    uint32_t activePaletteSize   = 0; // 4 bájt (Offset 4)
-    uint32_t dirtyPlanesMask     = 0; // 4 bájt (Offset 8)
-
-    uint32_t Grid_ID             = 0; // 4 bájt (Offset 12 -> TÖKÉLETES 4 bájtos alignment!)
-    uint32_t lastUpdateTick      = 0; // 4 bájt (Offset 16. Mikor nyúltunk hozzá utoljára?)
-    uint32_t lightMapIndex       = 0; // 4 bájt (Offset 20. Mutató a GlobalLightPool-ba)
-
-    int16_t  macroChunkX         = 0; // 2 bájt (Offset 24. Világ koordináták)
-    int16_t  macroChunkY         = 0; // 2 bájt (Offset 26.)
-    int16_t  macroChunkZ         = 0; // 2 bájt (Offset 28.)
-
-    uint8_t  chunkState          = 0; // 1 bájt (Offset 30. Enum: 0=Empty, 1=Generating, 2=Ready)
-    uint8_t  requiresLightUpdate = 0; // 1 bájt (Offset 31. Scheduler "Kuka" szűrő flag)
-
-    // Összesen PONTOSAN 32 bájt a hasznos adat! Nincs többé implicit padding csúszás.
-
-    // 64 - 32 = 32 bájt padding a tökéletes L1 Cache igazításhoz! (29-ről 32-re javítva)
-    uint8_t  _padding[32]        = {};
-
-    // II. FORRÓ AVX2 ZÓNA (Fix eltolások, maximális sűrűség)
-
-    // FIGYELEM: A 0. elemnek (index 0) mindkét tömbben a levegőnek kell lennie! (Globális ID: 0)
-    // 0: IS_SOLID, 1:IS_REPLACEABLE, 2:IS_LIQUID, 3:IS_HAZARD, 4:NEEDS_RANDOM_TICK, 5:FACE_CULLING_MERGE, 6-9:OPACITY, 10-15: RESERVED
-    alignas(32) std::array<uint16_t, MaxPaletteSize> paletteProperties = {};
-    alignas(32) std::array<uint32_t, MaxPaletteSize> paletteGlobalBlockStateIDs = {};
-
-    alignas(32) std::array<IndexType, 32768> data_BufferA = {};
-    alignas(32) std::array<IndexType, 32768> data_BufferB = {};
-
-    // A light_Buffer KIKERÜLT innen! Helyét a GlobalLightPool vette át (64KB spórolás).
-
-    alignas(32) std::array<std::array<uint64_t, 512>, MAX_BITPLANES> bitPlanes = {};
-    alignas(32) std::array<std::array<uint8_t, 512>, MAX_COARSE_GRIDS> coarseGrids = {};
-
-    // III. HIDEG ZÓNA (A struktúra legvégén)
-    IndexType* tickNow   = nullptr;
-    IndexType* tickAfter = nullptr;
-
-    Macrochunk() {
-        tickNow   = data_BufferA.data();
-        tickAfter = data_BufferB.data();
-    }
-
-    void SwapTickBuffers() { std::swap(tickNow, tickAfter); }
-};
-#pragma pack(pop)
-
-// Az egységesített, végleges Aréna kategóriák:
-using Macrochunk_Wilderness  = Macrochunk<uint8_t, 256>;   // ~78 KB
-using Macrochunk_NormalBase  = Macrochunk<uint16_t, 1024>; // ~118 KB
-using Macrochunk_HeavyModded = Macrochunk<uint16_t, 8192>; // ~238 KB
+; // ~238 KB
 
 // Chunk típusok azonosítása futásidőben
 enum class ChunkTier : uint8_t { UNLOADED = 0, WILDERNESS_8BIT, NORMAL_16BIT, HEAVY_16BIT };
@@ -336,7 +276,7 @@ public:
     // A Job Scheduler CSAK azokat a chunkokat adja át, ahol chunk->requiresLightUpdate != 0!
     // Így az inaktív területeket (a chunkok 90%-át) a CPU meg sem próbálja beolvasni.
     template <typename IndexType, size_t MaxPaletteSize>
-    static void ProcessLightJob(Macrochunk<IndexType, MaxPaletteSize>* chunk) {
+    static void ProcessLightJob(NF::Core::MacroChunk<IndexType, MaxPaletteSize>* chunk) {
 
         // 1. Ha a chunk eddig a "Dummy" blokkokra mutatott, lekérünk egy valódi, írható memóriát.
         if (chunk->lightMapIndex <= 1) {
