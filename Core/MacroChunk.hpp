@@ -53,9 +53,14 @@ namespace NF::Core {
         uint8_t  requiresLightUpdate = 0; // 1 bájt (Offset 31. Scheduler "Kuka" szűrő flag)
 
         // Összesen PONTOSAN 32 bájt a hasznos adat! Nincs többé implicit padding csúszás.
-
+        uint32_t GridID_TOP          = 0;
+        uint32_t GridID_BOTTOM       = 0;
+        uint32_t GridID_NORTH        = 0;
+        uint32_t GridID_EAST         = 0;
+        uint32_t GridID_SOUTH        = 0;
+        uint32_t GridID_WEST         = 0;
         // 64 - 32 = 32 bájt padding a tökéletes L1 Cache igazításhoz! (29-ről 32-re javítva)
-        uint8_t  _padding[30]        = {};
+        uint8_t  _padding[6]        = {};
 
         alignas(32) std::array<uint64_t, MaxPaletteSize/64> PaletteMask         = {};
 
@@ -66,13 +71,13 @@ namespace NF::Core {
         alignas(32) std::array<uint16_t, MaxPaletteSize> PaletteProperties = {};
         alignas(32) std::array<uint32_t, MaxPaletteSize> PaletteGlobalBlockStateIDs = {};
 
-        alignas(32) std::array<IndexType, 32768> data_BufferA = {};
-        alignas(32) std::array<IndexType, 32768> data_BufferB = {};
+        alignas(32) std::array<IndexType, 4096> data_BufferA = {};
+        alignas(32) std::array<IndexType, 4096> data_BufferB = {};
 
         // A light_Buffer KIKERÜLT innen! Helyét a GlobalLightPool vette át (64KB spórolás).
 
-        alignas(32) std::array<std::array<uint64_t, 512>, MAX_BITPLANES> bitPlanes = {};
-        alignas(32) std::array<std::array<uint8_t, 512>, MAX_COARSE_GRIDS> coarseGrids = {};
+        alignas(32) std::array<std::array<uint64_t, 64>, MAX_BITPLANES> bitPlanes = {};
+        alignas(32) std::array<std::array<uint8_t, 64>, MAX_COARSE_GRIDS> coarseGrids = {};
 
         // III. HIDEG ZÓNA (A struktúra legvégén)
         IndexType* tickNow   = nullptr;
@@ -88,9 +93,7 @@ namespace NF::Core {
 
     // Az egységesített, végleges Aréna kategóriák:
     using Macrochunk_SmallBase  = MacroChunk<uint8_t, 256>;// ~78 KB
-    using Macrochunk_NormalBase  = MacroChunk<uint16_t, 1024>; // ~118 KB -- át kellene írni valahogy 10bitre.
-    using Macrochunk_HeavyModded = MacroChunk<uint16_t, 8192>; // ~238 KB
-
+    using Macrochunk_NormalBase  = MacroChunk<uint16_t, 1024>; // ~238 KB
 
     bool UpgradeChunkPalette() {return true;}
 
@@ -102,7 +105,7 @@ namespace NF::Core {
 
         const IndexType* Voxel = chunk.tickNow;
 
-        for (uint32_t i = 0; i < 32768; ++i) {
+        for (uint32_t i = 0; i < 4096; ++i) {
             IndexType TempPaletteIndex = Voxel[i];
 
             TempPaletteMask[TempPaletteIndex >> 6] |= (1ULL << (TempPaletteIndex & 63));

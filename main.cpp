@@ -16,12 +16,12 @@ constexpr uint8_t  AIR_PALETTE_INDEX_8                  = 0;
 constexpr uint16_t AIR_PALETTE_INDEX_16                 = 0;
 
 // Maximum támogatott szálak száma a Trash Bin bufferhez
-constexpr size_t MAX_SUPPORTED_THREADS                  = 64;
+constexpr size_t MAX_SUPPORTED_THREADS                  = 16;
 
 // --- ÚJ: A GLOBÁLIS FÉNY-MEDENCE (LIGHT POOL) ---
 // Ez spórolja meg a 6.5 GB RAM-ot. Csak az aktív fények kapnak 64KB-ot.
 struct alignas(64) LightMap {
-    uint16_t data[32768];
+    uint16_t data[4096];
 };
 
 class GlobalLightPool {
@@ -42,7 +42,7 @@ public:
 
         // 1. INDEX: "DUMMY" NAPFÉNY
         // A felszíni, üres chunkok fognak ide mutatni (branchless olvasás a renderelőnek).
-        for (size_t i = 0; i < 32768; ++i) {
+        for (size_t i = 0; i < 4096; ++i) {
             pool[1].data[i] = 0xF000; // 4 bit Sun (Max), RGB (0)
         }
     }

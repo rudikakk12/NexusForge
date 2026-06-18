@@ -21,6 +21,10 @@ namespace NF::Core {
         Indextype PaletteIndex = 0;
         bool IsInPalette = false;
 
+        const __m256i* ptr = reinterpret_cast<const __m256i*>(GlobalBlockStateID);
+
+        
+
         for (uint32_t i = 0; i < chunk.activePaletteSize; ++i) {
             if (GlobalBlockStateID == chunk.activePalette[i]) {
                 PaletteIndex = static_cast<Indextype>(i);
@@ -30,16 +34,18 @@ namespace NF::Core {
         }
 
         if (!IsInPalette) {
-            if (chunk.activePaletteSize = MaxPaletteSize) {
+            if (chunk.activePaletteSize == MaxPaletteSize) {
                 std::cout << "Palette Overflow!" << std::endl;
-                return SetBlockResult::Full;
-            };
+                if (CheckMacroChunkPalette(chunk) == false){return SetBlockResult::Full;}
 
-
-
-
+            }
+        uint32_t FirstFreeIndex = FindfreePaletteIndex(chunk);
+        PaletteIndex = FirstFreeIndex;
+        chunk.PaletteMask[FirstFreeIndex >> 6] |= (1ULL << (FirstFreeIndex & 63));
+        chunk.PaletteGlobalBlockStateIDs[FirstFreeIndex] = GlobalBlockStateID;
         }
-
+        chunk.tickAfter[LocalIndex] = PaletteIndex;
+        return SetBlockResult::Success;
     }
 
 
