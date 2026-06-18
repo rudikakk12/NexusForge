@@ -43,7 +43,6 @@ namespace NF::Core {
     }
 
     SetBlockResult SetBlockInChunk_Small(MacroChunk_Small & chunk, uint16_t LocalIndex, uint32_t GlobalBlockStateID) {
-
         uint16_t PaletteIndex = 0;
         uint32_t IsInPalette = 0;
         const __m256i* ptr = reinterpret_cast<const __m256i*>(GlobalBlockStateID);
@@ -104,23 +103,27 @@ namespace NF::Core {
         }
 
 
-        if (IsInPalette == 0) {
+        if (!IsInPalette) {
             if (chunk.activePaletteSize == 256) {
-                std::cout << "Palette Overflow!" << std::endl;
-                if (CheckMacroChunkPalette_Small(chunk) == false){return SetBlockResult::Full;}
-                else{
-                    FirstFreeIndex = FindFreePaletteIndex_Small(chunk);
-                    PaletteIndex = FirstFreeIndex;
-                }
+                if (CheckMacroChunkPalette_Small(chunk) == false) { return SetBlockResult::Full; }
+                if (chunk.activePaletteSize == 256) { return SetBlockResult::Full; }
             }
-            chunk.PaletteMask[PaletteIndex >> 6] |= (1ULL << (FirstFreeIndex & 63));
-            chunk.PaletteGlobalBlockStateIDs[PaletteIndex] = GlobalBlockStateID;
 
-            chunk.tickAfter[LocalIndex] = PaletteIndex;
-            return SetBlockResult::Success;
+            uint32_t FirstFreeIndex = FindFreePaletteIndex_Small(chunk);
+            if (FirstFreeIndex == static_cast<uint32_t>(-1)) { return SetBlockResult::Full; }
+
+            PaletteIndex = FirstFreeIndex;
+            chunk.PaletteMask[FirstFreeIndex >> 6] |= (1ULL << (FirstFreeIndex & 63));
+            chunk.PaletteGlobalBlockStateIDs[FirstFreeIndex] = GlobalBlockStateID;
+
+            // ITT NÖVELJÜK A MÉRETET!
+            chunk.activePaletteSize++;
         }
+
+        chunk.tickAfter[LocalIndex] = static_cast<uint8_t>(PaletteIndex);
+        return SetBlockResult::Success;
+    }
 
 
 
     }
-}

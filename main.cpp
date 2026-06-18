@@ -310,10 +310,13 @@ int main() {
 
     bool siker = NF::Core::SetBlockInChunk_Small(asd, 100, 100);
     NF::Core::SetBlockInChunk_Small(asd, 101, 101);
+    NF::Core::SetBlockInChunk_Small(asd, 102, 102);
     asd.SwapTickBuffers();
-    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << asd.activePaletteSize << std::endl;
+    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
     asd.SwapTickBuffers();
-    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << asd.activePaletteSize << std::endl;
+    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
+    asd.SwapTickBuffers();
+    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
 
     return 0;
 }
