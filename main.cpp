@@ -312,6 +312,8 @@ int main() {
     NF::Core::SetBlockInChunk_Small(asd, 101, 101);
     asd.SwapTickBuffers();
     std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << asd.activePaletteSize << std::endl;
+    asd.SwapTickBuffers();
+    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << asd.activePaletteSize << std::endl;
 
     return 0;
 }
