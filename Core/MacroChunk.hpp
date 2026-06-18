@@ -29,8 +29,7 @@ namespace NF::Core {
     constexpr size_t MAX_BITPLANES = 8;
     constexpr size_t MAX_COARSE_GRIDS = 4;
 
-    template <typename IndexType, size_t MaxPaletteSize>
-    struct alignas(64) MacroChunk {
+    struct alignas(64) MacroChunk_Small {
 
         // I. A FEJLÉC (Fix 64 bájt, optimalizálva az L1 Cache-hez és a memóriahatárokhoz)
         // JAVÍTVA: A sorrend úgy lett optimalizálva, hogy pontosan a memóriahatárokra essen
@@ -62,17 +61,17 @@ namespace NF::Core {
         // 64 - 32 = 32 bájt padding a tökéletes L1 Cache igazításhoz! (29-ről 32-re javítva)
         uint8_t  _padding[6]        = {};
 
-        alignas(32) std::array<uint64_t, MaxPaletteSize/64> PaletteMask         = {};
+        alignas(32) std::array<uint64_t, 4> PaletteMask         = {};
 
         // II. FORRÓ AVX2 ZÓNA (Fix eltolások, maximális sűrűség)
 
         // FIGYELEM: A 0. elemnek (index 0) mindkét tömbben a levegőnek kell lennie! (Globális ID: 0)
         // 0: IS_SOLID, 1:IS_REPLACEABLE, 2:IS_LIQUID, 3:IS_HAZARD, 4:NEEDS_RANDOM_TICK, 5:FACE_CULLING_MERGE, 6-9:OPACITY, 10-15: RESERVED
-        alignas(32) std::array<uint16_t, MaxPaletteSize> PaletteProperties = {};
-        alignas(32) std::array<uint32_t, MaxPaletteSize> PaletteGlobalBlockStateIDs = {};
+        alignas(32) std::array<uint16_t, 256> PaletteProperties = {};
+        alignas(32) std::array<uint32_t, 256> PaletteGlobalBlockStateIDs = {};
 
-        alignas(32) std::array<IndexType, 4096> data_BufferA = {};
-        alignas(32) std::array<IndexType, 4096> data_BufferB = {};
+        alignas(32) std::array<uint8_t, 4096> data_BufferA = {};
+        alignas(32) std::array<uint8_t, 4096> data_BufferB = {};
 
         // A light_Buffer KIKERÜLT innen! Helyét a GlobalLightPool vette át (64KB spórolás).
 
@@ -80,10 +79,10 @@ namespace NF::Core {
         alignas(32) std::array<std::array<uint8_t, 64>, MAX_COARSE_GRIDS> coarseGrids = {};
 
         // III. HIDEG ZÓNA (A struktúra legvégén)
-        IndexType* tickNow   = nullptr;
-        IndexType* tickAfter = nullptr;
+        uint8_t* tickNow   = nullptr;
+        uint8_t* tickAfter = nullptr;
 
-        MacroChunk() {
+        MacroChunk_Small() {
             tickNow   = data_BufferA.data();
             tickAfter = data_BufferB.data();
         }
@@ -91,27 +90,24 @@ namespace NF::Core {
         void SwapTickBuffers() { std::swap(tickNow, tickAfter); }
     };
 
-    // Az egységesített, végleges Aréna kategóriák:
-    using Macrochunk_SmallBase  = MacroChunk<uint8_t, 256>;// ~78 KB
-    using Macrochunk_NormalBase  = MacroChunk<uint16_t, 1024>; // ~238 KB
+
 
     bool UpgradeChunkPalette() {return true;}
 
-    template<typename IndexType, size_t MaxPaletteSize>
-    bool CheckMacroChunkPalette(MacroChunk<IndexType, MaxPaletteSize> & chunk) {
+    bool CheckMacroChunkPalette_Small(MacroChunk_Small & chunk) {
 
-        constexpr size_t MaskArraySize = MaxPaletteSize / 64;
+        constexpr size_t MaskArraySize = 4;
         uint64_t TempPaletteMask[MaskArraySize] = {0};
 
-        const IndexType* Voxel = chunk.tickNow;
+        const uint8_t* Voxel = chunk.tickNow;
 
         for (uint32_t i = 0; i < 4096; ++i) {
-            IndexType TempPaletteIndex = Voxel[i];
+            uint8_t TempPaletteIndex = Voxel[i];
 
             TempPaletteMask[TempPaletteIndex >> 6] |= (1ULL << (TempPaletteIndex & 63));
             }
 
-        IndexType NewPaletteSize = 0;
+        uint8_t NewPaletteSize = 0;
         uint32_t NeedsCompression = 0;
 
         for (uint32_t i = 0; i < MaskArraySize; ++i) {
@@ -123,7 +119,7 @@ namespace NF::Core {
 
             NeedsCompression |= (OldMask != chunk.PaletteMask[i]);
         }
-        chunk.extraFlags |= NeedsCompression << NEEDS_COMPRESSION_FLAG_SHIFT;
+        chunk.flags |= NeedsCompression << NEEDS_COMPRESSION_FLAG_SHIFT;
 
         chunk.activePaletteSize = NeedsCompression ? NewPaletteSize : chunk.activePaletteSize;
     return true;

@@ -275,8 +275,8 @@ class LightEngine {
 public:
     // A Job Scheduler CSAK azokat a chunkokat adja át, ahol chunk->requiresLightUpdate != 0!
     // Így az inaktív területeket (a chunkok 90%-át) a CPU meg sem próbálja beolvasni.
-    template <typename IndexType, size_t MaxPaletteSize>
-    static void ProcessLightJob(NF::Core::MacroChunk<IndexType, MaxPaletteSize>* chunk) {
+
+    static void ProcessLightJob(NF::Core::MacroChunk_Small* chunk) {
 
         // 1. Ha a chunk eddig a "Dummy" blokkokra mutatott, lekérünk egy valódi, írható memóriát.
         if (chunk->lightMapIndex <= 1) {
@@ -305,6 +305,13 @@ int main() {
 
     GlobalLightPool::Initialize();
     std::cout << "Data-Oriented Voxel Engine (LightPool) inicializalva..." << std::endl;
+
+    NF::Core::MacroChunk_Small asd;
+
+    NF::Core::SetBlockInChunk_Small(asd, 100, 100);
+    NF::Core::SetBlockInChunk_Small(asd, 101, 101);
+
+    std::cout << asd.tickNow[100] << asd.tickNow[101] << asd.activePaletteSize << std::endl;
 
     return 0;
 }
