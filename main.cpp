@@ -308,10 +308,10 @@ int main() {
 
     NF::Core::MacroChunk_Small asd;
 
-    NF::Core::SetBlockInChunk_Small(asd, 100, 100);
+    bool siker = NF::Core::SetBlockInChunk_Small(asd, 100, 100);
     NF::Core::SetBlockInChunk_Small(asd, 101, 101);
-
-    std::cout << asd.tickNow[100] << asd.tickNow[101] << asd.activePaletteSize << std::endl;
+    asd.SwapTickBuffers();
+    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << asd.activePaletteSize << std::endl;
 
     return 0;
 }
