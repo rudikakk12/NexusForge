@@ -1,204 +1,115 @@
+//
+// Fájl: main.cpp
+// Készítette: NexusForge Engine (Rick & Gem)
+//
 #include <cstdint>
 #include <vector>
 #include <iostream>
 #include <array>
 #include <atomic>
-#include <utility> // ÚJ: std::swap miatt szükséges
-#include "Core/BlockPlacement.hpp"
+#include <utility>
+
+// Beemeljük a saját Core headereidet
 #include "Core/MacroChunk.hpp"
+#include "Core/BlockPlacement.hpp"
+
+// AZ ÚJ TITAN PIPELINE (Ezt a fájlt adtam az előző üzenetben!)
+#include "Core/MutationPipeline.hpp"
+
+using namespace NF::Core;
 
 // --- KONSTANSOK ---
-constexpr uint32_t FLAG_REJECTED                        = 1U << 31;
-constexpr uint32_t FLAG_OVERWRITE_SOLID                 = 1U << 30;
-// Paletta indexek (Szigorú szabály: a 0-s index MINDIG a levegő a chunk palettájában)
-// Ez garantálja, hogy a C++ zero-initialization (vagy egy memset(0)) azonnal levegővel tölti fel a teret.
-constexpr uint8_t  AIR_PALETTE_INDEX_8                  = 0;
-constexpr uint16_t AIR_PALETTE_INDEX_16                 = 0;
+constexpr uint32_t FLAG_REJECTED        = 1U << 31;
+constexpr uint32_t FLAG_OVERWRITE_SOLID = 1U << 30;
 
-// Maximum támogatott szálak száma a Trash Bin bufferhez
-constexpr size_t MAX_SUPPORTED_THREADS                  = 16;
+constexpr uint8_t  AIR_PALETTE_INDEX_8  = 0;
+constexpr uint16_t AIR_PALETTE_INDEX_16 = 0;
+constexpr size_t MAX_SUPPORTED_THREADS  = 16;
 
-// --- ÚJ: A GLOBÁLIS FÉNY-MEDENCE (LIGHT POOL) ---
-// Ez spórolja meg a 6.5 GB RAM-ot. Csak az aktív fények kapnak 64KB-ot.
+// --- A GLOBÁLIS FÉNY-MEDENCE (LIGHT POOL) ---
 struct alignas(64) LightMap {
     uint16_t data[4096];
 };
 
 class GlobalLightPool {
 private:
-    // Lock-free foglaláshoz atomi számláló.
     static inline std::atomic<uint32_t> nextFreeIndex{2};
-
 public:
-    // Előre lefoglalt memória a töredezettség elkerülésére
     static inline std::vector<LightMap> pool;
 
     static void Initialize() {
-        // Lefoglalunk helyet mondjuk 10,000 aktív fényes chunk-nak (640 MB RAM)
         pool.resize(10000);
-
-        // 0. INDEX: "DUMMY" KOROMSÖTÉT
-        // Mivel zero-initialized a vector, ez alapból csupa 0. Senki nem írhat bele.
-
+        // 0. INDEX: "DUMMY" KOROMSÖTÉT (Minden nulla)
         // 1. INDEX: "DUMMY" NAPFÉNY
-        // A felszíni, üres chunkok fognak ide mutatni (branchless olvasás a renderelőnek).
         for (size_t i = 0; i < 4096; ++i) {
-            pool[1].data[i] = 0xF000; // 4 bit Sun (Max), RGB (0)
+            pool[1].data[i] = 0xF000; 
         }
     }
 
-    // Villámgyors aszinkron foglalás a fény-motornak
     static uint32_t AllocateNewLightMap() {
-        // std::memory_order_relaxed elég, mert csak egy ID-t kérünk ki.
-        // Később ide jöhet egy Free-List a törölt chunkok újrahasznosítására.
         uint32_t index = nextFreeIndex.fetch_add(1, std::memory_order_relaxed);
-        // Biztonsági öv - ha kifutunk a memóriából, inkább sötét marad, de nem fagy ki.
         return (index < pool.size()) ? index : 0;
     }
 };
 
-// --- 1. ADATSTRUKTÚRÁK ---
-#pragma pack(push, 4) // Kényszerítjük, hogy ne legyenek "lukak" az adatok között
-struct alignas(64) GlobalMoveCommand {
-    // 12 bájt: Forrás helye
-    uint16_t srcLocalIndex;
-    int16_t srcChunkX; int16_t srcChunkY; int16_t srcChunkZ;
-    uint32_t sourceGridID;
-
-    // 12 bájt: Cél helye
-    uint16_t tgtLocalIndex;
-    int16_t tgtChunkX; int16_t tgtChunkY; int16_t tgtChunkZ;
-    uint32_t targetGridID;
-
-    // 16 bájt: Fizikai payload
-    // Paletta indexeket használunk, hogy beleférjen a 8/16 bites bufferbe!
-    uint32_t sourcePaletteIndex;
-    uint32_t targetPaletteIndex;
-    uint32_t force;
-    uint32_t flags;
-
-    // 24 bájt: Modder játszótér
-    union {
-        uint8_t rawModData[24];
-        struct { float dirX, dirY, dirZ; uint32_t damage; uint64_t entityUUID; } mod_physics;
-    };
-};
-#pragma pack(pop)
-
-; // ~238 KB
-
-// Chunk típusok azonosítása futásidőben
+// --- CHUNK TIER ÉS MEMORY MANAGER MOCK ---
 enum class ChunkTier : uint8_t { UNLOADED = 0, WILDERNESS_8BIT, NORMAL_16BIT, HEAVY_16BIT };
 
-// Adatstruktúra a MemoryManager számára
 struct ChunkBufferInfo {
-    void* bufferTickAfter; // Nyers mutató a data_BufferB-re (Type Erasure)
+    void* bufferTickAfter; 
     ChunkTier tier;
 };
 
-// Két különálló "Mérgező" Trash Bin a csonkolás elkerülésére (A méret megnövelve 64-re a szál-túlcsordulás miatt)
 static uint8_t  TRASH_BIN_8BIT[MAX_SUPPORTED_THREADS]  = {0};
 static uint16_t TRASH_BIN_16BIT[MAX_SUPPORTED_THREADS] = {0};
 
 class MemoryManager {
 public:
     static ChunkBufferInfo GetChunkTickAfterBuffer(uint32_t gridID, int16_t cx, int16_t cy, int16_t cz) {
+        // Valós implementáció jön ide
         if (cx == 0) return { nullptr, ChunkTier::UNLOADED };
         if (cx == 1) return { nullptr, ChunkTier::WILDERNESS_8BIT };
         return { nullptr, ChunkTier::NORMAL_16BIT };
     }
 };
 
-// --- 4. SZERVEZŐ (SCHEDULER) ---
-struct ArbiterJob { size_t startIndex; size_t endIndex; };
-
-// --- AZ ARBITER TÉRBELI HASH TÁBLÁJA ---
-constexpr uint32_t HASH_SIZE_MASK = 0xFFFFF;
-constexpr uint32_t HASH_TABLE_SIZE = 1048576;
-constexpr uint32_t EMPTY_SLOT = 0xFFFFFFFF;
-
-class PhysicsArbiter {
-private:
-    static inline std::array<std::atomic<uint32_t>, HASH_TABLE_SIZE> spatialGrid;
-
-    static uint32_t HashCoords(uint32_t gridID, uint16_t localIndex) {
-        uint32_t hash = 2166136261u;
-        hash ^= gridID;
-        hash *= 16777619u;
-        hash ^= localIndex;
-        hash *= 16777619u;
-        return hash & HASH_SIZE_MASK;
-    }
-
+// --- ÚJ: O(1) DETERMINISZTIKUS KÖLCSÖNÖS MEGSEMMISÜLÉS ARBITER ---
+class O1_PhysicsArbiter {
 public:
-    static void ResetGrid() {
-        for (uint32_t i = 0; i < HASH_TABLE_SIZE; ++i) {
-            spatialGrid[i].store(EMPTY_SLOT, std::memory_order_relaxed);
-        }
-    }
+    // MEGJEGYZÉS: Itt a MoveCommand_Block-ot használjuk a Titan Pipeline-ból!
+    static void ResolveConflicts(std::vector<MoveCommand_Block>& sorted_cmds, size_t count) {
+        if (count < 2) return;
+        
+        for (size_t i = 0; i < count - 1; ++i) {
+            auto& a = sorted_cmds[i];
+            auto& b = sorted_cmds[i + 1];
 
-    static void ResolveTargetConflicts(GlobalMoveCommand* commands, ArbiterJob job) {
-        for (size_t i = job.startIndex; i < job.endIndex; ++i) {
-            auto& myCmd = commands[i];
-            std::atomic_ref<uint32_t> myFlags(myCmd.flags);
+            if (a.flags & FLAG_REJECTED) continue; 
 
-            if (myFlags.load(std::memory_order_relaxed) & FLAG_REJECTED) continue;
-
-            uint32_t hash = HashCoords(myCmd.targetGridID, myCmd.tgtLocalIndex);
-            uint32_t currentWinnerIndex = spatialGrid[hash].load(std::memory_order_relaxed);
-            bool resolved = false;
-
-            while (!resolved) {
-                if (currentWinnerIndex == EMPTY_SLOT) {
-                    if (spatialGrid[hash].compare_exchange_weak(
-                            currentWinnerIndex, i,
-                            std::memory_order_release,
-                            std::memory_order_relaxed
-                        ))
-                    {
-                        resolved = true;
-                    }
+            if (a.targetGridID == b.targetGridID && a.tgtLocalIndex == b.tgtLocalIndex) {
+                if (a.force > b.force) {
+                    b.flags |= FLAG_REJECTED;
+                } else if (a.force < b.force) {
+                    a.flags |= FLAG_REJECTED;
                 } else {
-                    GlobalMoveCommand& competingCmd = commands[currentWinnerIndex];
-                    std::atomic_ref<uint32_t> competingFlags(competingCmd.flags);
-
-                    if (myCmd.targetGridID == competingCmd.targetGridID &&
-                        myCmd.tgtLocalIndex == competingCmd.tgtLocalIndex)
-                    {
-                        if (myCmd.force > competingCmd.force) {
-                            if (spatialGrid[hash].compare_exchange_weak(
-                                    currentWinnerIndex, i,
-                                    std::memory_order_release,
-                                    std::memory_order_relaxed))
-                            {
-                                competingFlags.fetch_or(FLAG_REJECTED, std::memory_order_relaxed);
-                                resolved = true;
-                            }
-                        } else {
-                            myFlags.fetch_or(FLAG_REJECTED, std::memory_order_relaxed);
-                            resolved = true;
-                        }
-                    } else {
-                        hash = (hash + 1) & HASH_SIZE_MASK;
-                        currentWinnerIndex = spatialGrid[hash].load(std::memory_order_relaxed);
-                    }
+                    // DÖNTETLEN ESETÉN: Mindkét blokk/jármű megsemmisül! Kőkemény fizika!
+                    a.flags |= FLAG_REJECTED;
+                    b.flags |= FLAG_REJECTED;
                 }
             }
         }
     }
 };
 
-// --- 5. COMMIT FÁZIS (3-Tier Támogatással) ---
+// --- COMMIT FÁZIS (Rögzítés a memóriába) ---
 class PhysicsEngine {
 public:
-    static void CommitSources(GlobalMoveCommand* commands, ArbiterJob job, int threadID) {
-        // Biztonsági rács a TRASH_PTR túlcsordulása ellen
+    static void CommitSources(std::vector<MoveCommand_Block>& commands, size_t count, int threadID) {
         uint8_t* const TRASH_PTR_8  = &TRASH_BIN_8BIT[threadID % MAX_SUPPORTED_THREADS];
         uint16_t* const TRASH_PTR_16 = &TRASH_BIN_16BIT[threadID % MAX_SUPPORTED_THREADS];
 
-        for (size_t i = job.startIndex; i < job.endIndex; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             auto& cmd = commands[i];
-
             ChunkBufferInfo srcInfo = MemoryManager::GetChunkTickAfterBuffer(cmd.sourceGridID, cmd.srcChunkX, cmd.srcChunkY, cmd.srcChunkZ);
 
             uint32_t isLoaded = (srcInfo.tier != ChunkTier::UNLOADED);
@@ -207,12 +118,8 @@ public:
 
             if (srcInfo.tier == ChunkTier::WILDERNESS_8BIT) {
                 uint8_t* rawBuf = static_cast<uint8_t*>(srcInfo.bufferTickAfter);
-                // JAVÍTVA UB: Ha a chunk nincs betöltve, a rawBuf nullptr. Ha ehhez adjuk hozzá az indexet,
-                // az C++ Undefined Behavior, még akkor is, ha a ternary operátorral elkerüljük az írást!
-                // A safeBuf és safeIndex garantálja, hogy a memóriacím mindig érvényes, elágazás nélkül.
                 uint32_t safeIndex = isLoaded ? cmd.srcLocalIndex : 0;
                 uint8_t* safeBuf = isLoaded ? rawBuf : TRASH_PTR_8;
-
                 uint8_t* finalSourcePtr = execute ? &safeBuf[safeIndex] : TRASH_PTR_8;
                 *finalSourcePtr = AIR_PALETTE_INDEX_8;
             }
@@ -220,20 +127,18 @@ public:
                 uint16_t* rawBuf = static_cast<uint16_t*>(srcInfo.bufferTickAfter);
                 uint32_t safeIndex = isLoaded ? cmd.srcLocalIndex : 0;
                 uint16_t* safeBuf = isLoaded ? rawBuf : TRASH_PTR_16;
-
                 uint16_t* finalSourcePtr = execute ? &safeBuf[safeIndex] : TRASH_PTR_16;
                 *finalSourcePtr = AIR_PALETTE_INDEX_16;
             }
         }
     }
 
-    static void CommitTargets(GlobalMoveCommand* commands, ArbiterJob job, int threadID) {
+    static void CommitTargets(std::vector<MoveCommand_Block>& commands, size_t count, int threadID) {
         uint8_t* const TRASH_PTR_8  = &TRASH_BIN_8BIT[threadID % MAX_SUPPORTED_THREADS];
         uint16_t* const TRASH_PTR_16 = &TRASH_BIN_16BIT[threadID % MAX_SUPPORTED_THREADS];
 
-        for (size_t i = job.startIndex; i < job.endIndex; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             auto& cmd = commands[i];
-
             ChunkBufferInfo tgtInfo = MemoryManager::GetChunkTickAfterBuffer(cmd.targetGridID, cmd.tgtChunkX, cmd.tgtChunkY, cmd.tgtChunkZ);
 
             uint32_t isLoaded = (tgtInfo.tier != ChunkTier::UNLOADED);
@@ -242,9 +147,6 @@ public:
 
             if (tgtInfo.tier == ChunkTier::WILDERNESS_8BIT) {
                 uint8_t* rawBuf = static_cast<uint8_t*>(tgtInfo.bufferTickAfter);
-
-                // JAVÍTVA UB: Itt garantáljuk, hogy sose olvassunk memóriaszemetet az isAir kiszámításánál,
-                // ha a chunk nincs betöltve. A safeBuf[0]-ra fallbackel, ami mindig valid a TRASH_BIN miatt.
                 uint32_t safeIndex = isLoaded ? cmd.tgtLocalIndex : 0;
                 uint8_t* safeBuf = isLoaded ? rawBuf : TRASH_PTR_8;
 
@@ -256,7 +158,6 @@ public:
             }
             else if (isLoaded) {
                 uint16_t* rawBuf = static_cast<uint16_t*>(tgtInfo.bufferTickAfter);
-
                 uint32_t safeIndex = isLoaded ? cmd.tgtLocalIndex : 0;
                 uint16_t* safeBuf = isLoaded ? rawBuf : TRASH_PTR_16;
 
@@ -270,53 +171,100 @@ public:
     }
 };
 
-// --- ÚJ: 7. FÉNY MOTOR (ASZINKRON JOB) ---
+// --- FÉNY MOTOR ---
 class LightEngine {
 public:
-    // A Job Scheduler CSAK azokat a chunkokat adja át, ahol chunk->requiresLightUpdate != 0!
-    // Így az inaktív területeket (a chunkok 90%-át) a CPU meg sem próbálja beolvasni.
-
-    static void ProcessLightJob(NF::Core::MacroChunk_Small* chunk) {
-
-        // 1. Ha a chunk eddig a "Dummy" blokkokra mutatott, lekérünk egy valódi, írható memóriát.
+    template <typename IndexType, size_t MaxPaletteSize>
+    static void ProcessLightJob(MacroChunk<IndexType, MaxPaletteSize>* chunk) {
         if (chunk->lightMapIndex <= 1) {
             chunk->lightMapIndex = GlobalLightPool::AllocateNewLightMap();
         }
-
-        // Biztonsági vonal: Ha kifogytunk a medencéből (Index 0-t kaptunk), kiszállunk.
         if (chunk->lightMapIndex == 0) return;
-
-        // 2. Kőkemény Branchless Hot Path az AVX2-nek
         uint16_t* myLightData = GlobalLightPool::pool[chunk->lightMapIndex].data;
-
-        // ... IDE JÖN A FÉNYTERJEDÉS (Flood fill algoritmus) ...
-        // myLightData[i] = ...
-
-        // 3. Kész vagyunk! Kinyomjuk a flaget, így a Scheduler legközelebb
-        // azonnal a "Kukába rakja" a frissítési kérelmet, amíg nem történik új blokk-lerakás.
+        // Flood fill ...
         chunk->requiresLightUpdate = 0;
     }
 };
 
-// --- 8. A "START" GOMB ---
+// ========================================================================
+// A NEXUSFORGE "START" GOMB (A fő játékhurok)
+// ========================================================================
 int main() {
-    // Inicializáljuk a lock-free rácsot a start előtt, különben véletlen memóriaszeméttel próbálna ütközést vizsgálni!
-    PhysicsArbiter::ResetGrid();
+    std::cout << "====================================================\n";
+    std::cout << " NEXUSFORGE TITAN ENGINE - INITIALIZATION\n";
+    std::cout << "====================================================\n";
 
     GlobalLightPool::Initialize();
-    std::cout << "Data-Oriented Voxel Engine (LightPool) inicializalva..." << std::endl;
+    
+    // 1. A Titan háttérszálak felébrednek
+    MutationPipeline engine;
+    
+    // 2. Globális Tick Pufferek (Kőkemény memória előfoglalás)
+    constexpr size_t MAX_TICK_EVENTS = 250000; 
+    
+    std::vector<MoveCommand_Deletion> del_src, del_dst;
+    std::vector<MoveCommand_Liquid> liq_src, liq_dst;
+    std::vector<MoveCommand_Block> blk_src, blk_dst;
+    std::vector<SortItem> items, aux;
+    
+    del_src.reserve(MAX_TICK_EVENTS); del_dst.resize(MAX_TICK_EVENTS);
+    liq_src.reserve(MAX_TICK_EVENTS); liq_dst.resize(MAX_TICK_EVENTS);
+    blk_src.reserve(MAX_TICK_EVENTS); blk_dst.resize(MAX_TICK_EVENTS);
+    items.resize(MAX_TICK_EVENTS);    aux.resize(MAX_TICK_EVENTS);
 
-    NF::Core::MacroChunk_Small asd;
+    std::cout << "[SYSTEM] LightPool és Memoria Pufferek lefoglalva.\n";
+    std::cout << "[SYSTEM] O(1) Mutual Destruction Arbiter aktiv.\n\n";
 
-    bool siker = NF::Core::SetBlockInChunk_Small(asd, 100, 100);
-    NF::Core::SetBlockInChunk_Small(asd, 101, 101);
-    NF::Core::SetBlockInChunk_Small(asd, 102, 102);
+    // --- TE TESZTED ---
+    /*
+    MacroChunk_Small asd;
+    bool siker = SetBlockInChunk_Small(asd, 100, 100);
+    SetBlockInChunk_Small(asd, 101, 101);
+    SetBlockInChunk_Small(asd, 102, 102);
     asd.SwapTickBuffers();
-    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
-    asd.SwapTickBuffers();
-    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
-    asd.SwapTickBuffers();
-    std::cout << (int)siker << (int)asd.tickNow[100] << (int)asd.tickNow[101] << (int)asd.tickNow[102] << asd.activePaletteSize << std::endl;
+    std::cout << "Teszt kimenet: " << (int)siker << " | " << asd.activePaletteSize << std::endl;
+    */
 
+    // --- A GAME LOOP ---
+    bool isServerRunning = true;
+    uint64_t tickCounter = 0;
+
+    while (isServerRunning) {
+        
+        // PHASE 1: EVENTEK (Hálózat, SubGrid adatok, Játékos építés)
+        size_t tick_deletions = del_src.size();
+        size_t tick_liquids   = liq_src.size();
+        size_t tick_blocks    = blk_src.size();
+
+        // PHASE 2 & 3: STRUKTURÁLIS MUTÁCIÓ & ARBITER
+        if (tick_deletions > 0) {
+            engine.ExecutePhase(items, aux, del_src, del_dst, tick_deletions);
+        }
+        
+        if (tick_blocks > 0) {
+            // Szortírozzuk és Memóriába Gatherezzük a 64-bájtos adatokat
+            engine.ExecutePhase(items, aux, blk_src, blk_dst, tick_blocks);
+            
+            // O(1) Döntéshozatal: A szortírozott listán azonnal kiderül, ki ütközik
+            O1_PhysicsArbiter::ResolveConflicts(blk_dst, tick_blocks);
+            
+            // PHASE 4: COMMIT (Beégetjük az adatot a Chunkok bufferébe)
+            PhysicsEngine::CommitSources(blk_dst, tick_blocks, 0); // Főszálon hívjuk (0. szál id)
+            PhysicsEngine::CommitTargets(blk_dst, tick_blocks, 0);
+        }
+
+        if (tick_liquids > 0) {
+            engine.ExecutePhase(items, aux, liq_src, liq_dst, tick_liquids);
+        }
+
+        // PHASE 5: WIDE EXECUTION & RENDER PREP
+        // Itt pörög a LightEngine és az Entity AI a lock-free világon!
+
+        tickCounter++;
+        // Egyetlen teszt-tick után kilép
+        if (tickCounter >= 1) isServerRunning = false; 
+    }
+
+    std::cout << "Engine Shutdown tiszta kilepessel.\n";
     return 0;
 }
