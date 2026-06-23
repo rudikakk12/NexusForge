@@ -1,6 +1,7 @@
 //
 // Fájl: Core/MutationPipeline.hpp
 // Készítette: NexusForge Engine (Rick & Gem)
+// Cél: Multi-Payload AVX2/SSE2 Radix Pipeline Perzisztens Szálakkal.
 //
 #pragma once
 
@@ -9,6 +10,7 @@
 #include <barrier>
 #include <atomic>
 #include <algorithm>
+#include <functional>
 #include <immintrin.h> 
 #include <emmintrin.h> 
 
@@ -20,8 +22,9 @@
 
 namespace NF::Core {
 
-    // --- 1. PAYLOAD STRUKTÚRÁK (L1 Cache Igazítva) ---
+    // --- 1. PAYLOAD STRUKTÚRÁK (Szigorú L1 Cache Igazítás) ---
 
+    // 16 bájt - SSE2
     #pragma pack(push, 2)
     struct alignas(16) MoveCommand_Deletion {
         uint16_t localIndex; int16_t chunkX; int16_t chunkY; int16_t chunkZ; uint32_t gridID;
@@ -29,6 +32,7 @@ namespace NF::Core {
     };
     #pragma pack(pop)
 
+    // 32 bájt - AVX2 (Fél)
     #pragma pack(push, 4)
     struct alignas(32) MoveCommand_Liquid {
         uint16_t localIndex; int16_t chunkX; int16_t chunkY; int16_t chunkZ; uint32_t gridID;
@@ -37,6 +41,7 @@ namespace NF::Core {
     };
     #pragma pack(pop)
 
+    // 64 bájt - AVX2 (Teljes)
     #pragma pack(push, 4)
     struct alignas(64) MoveCommand_Block {
         uint16_t srcLocalIndex; int16_t srcChunkX; int16_t srcChunkY; int16_t srcChunkZ; uint32_t sourceGridID;
@@ -53,7 +58,27 @@ namespace NF::Core {
         uint64_t key; uint32_t index; uint32_t _pad;
     };
 
-    // --- 2. A TITAN PIPELINE MOTOR (Perzisztens Szálakkal) ---
+    // Univerzális kulcs kinyerő (Compile-Time elágazással)
+    template <typename T>
+    inline uint64_t ExtractSortKey(const T& cmd) {
+        uint64_t key = 0;
+        if constexpr (std::is_same_v<T, MoveCommand_Deletion> || std::is_same_v<T, MoveCommand_Liquid>) {
+            key |= (static_cast<uint64_t>(cmd.gridID) & 0xFFFFFF) << 40;
+            key |= (static_cast<uint64_t>(cmd.chunkX) & 0xFF) << 32;
+            key |= (static_cast<uint64_t>(cmd.chunkY) & 0xFF) << 24;
+            key |= (static_cast<uint64_t>(cmd.chunkZ) & 0xFF) << 16;
+            key |= (static_cast<uint64_t>(cmd.localIndex) & 0xFFFF);
+        } else if constexpr (std::is_same_v<T, MoveCommand_Block>) {
+            key |= (static_cast<uint64_t>(cmd.targetGridID) & 0xFFFFFF) << 40;
+            key |= (static_cast<uint64_t>(cmd.tgtChunkX) & 0xFF) << 32;
+            key |= (static_cast<uint64_t>(cmd.tgtChunkY) & 0xFF) << 24;
+            key |= (static_cast<uint64_t>(cmd.tgtChunkZ) & 0xFF) << 16;
+            key |= (static_cast<uint64_t>(cmd.tgtLocalIndex) & 0xFFFF);
+        }
+        return key;
+    }
+
+    // --- 2. A TITAN PIPELINE (Job System) ---
     class MutationPipeline {
     private:
         enum class JobPhase { SLEEP, SORT_DEL, SORT_LIQ, SORT_BLK, SHUTDOWN };
@@ -65,11 +90,9 @@ namespace NF::Core {
         std::atomic<JobPhase> current_phase{JobPhase::SLEEP};
         std::atomic<size_t> next_hist{0}, next_scatter{0}, next_gather{0};
 
-        // Pointerek a futó tick aktuális adataihoz
-        SortItem* RESTRICT p_in;
-        SortItem* RESTRICT p_out;
-        void* RESTRICT p_src;
-        void* RESTRICT p_dst;
+        SortItem* RESTRICT p_in; SortItem* RESTRICT p_out;
+        void* RESTRICT p_src; void* RESTRICT p_dst;
+        
         size_t job_n;
         size_t NUM_CHUNKS;
         size_t chunk_size;
@@ -98,6 +121,7 @@ namespace NF::Core {
                     }
                     uint32_t idx = p_in[i].index;
 
+                    // Compile-Time Típusválasztó a hardveres utasításokhoz
                     if constexpr (sizeof(PayloadType) == 64) {
                         const __m256i* s = reinterpret_cast<const __m256i*>(&src[idx]);
                         __m256i* d       = reinterpret_cast<__m256i*>(&dst[i]);
@@ -118,12 +142,13 @@ namespace NF::Core {
 
         void WorkerLoop(int t_id) {
             while (true) {
-                sync_point->arrive_and_wait(); // Várakozás a Main szálra
+                sync_point->arrive_and_wait(); 
                 JobPhase phase = current_phase.load(std::memory_order_acquire);
+                
                 if (phase == JobPhase::SHUTDOWN) break;
                 if (phase == JobPhase::SLEEP) continue;
 
-                // 1. RADIX SORT FÁZIS (Mindhárom típusra ugyanaz)
+                // 1. Radix Indexelés (Mindhárom típusra ugyanaz)
                 for (int pass = 0; pass < 6; ++pass) {
                     int shift = pass * 11;
                     uint32_t mask = (pass == 5) ? 0x1FF : 0x7FF;
@@ -140,6 +165,7 @@ namespace NF::Core {
                         size_t start = c * chunk_size; size_t end = std::min(start + chunk_size, job_n);
                         uint32_t h0[2048] = {0}; uint32_t h1[2048] = {0}; uint32_t h2[2048] = {0}; uint32_t h3[2048] = {0};
                         size_t i = start; size_t end_unrolled = start + ((end - start) & ~3);
+                        
                         for (; i < end_unrolled; i += 4) {
                             __builtin_prefetch(&p_in[i + 32], 0, 0);
                             h0[(p_in[i+0].key >> shift) & mask]++; h1[(p_in[i+1].key >> shift) & mask]++;
@@ -174,24 +200,23 @@ namespace NF::Core {
                     sync_point->arrive_and_wait();
                 }
 
-                // 2. GATHER FÁZIS (Típusfüggő)
+                // 2. Szétágazó Fizikai Másolás (Gather)
                 if (phase == JobPhase::SORT_DEL) ExecuteGather<MoveCommand_Deletion>(t_id);
                 else if (phase == JobPhase::SORT_LIQ) ExecuteGather<MoveCommand_Liquid>(t_id);
                 else if (phase == JobPhase::SORT_BLK) ExecuteGather<MoveCommand_Block>(t_id);
                 
-                sync_point->arrive_and_wait(); // Várakozás a fázis végére
+                sync_point->arrive_and_wait();
             }
         }
 
     public:
         MutationPipeline() {
-            // Szigorú heurisztika: Maximum 6 szál a Radix-nak, hogy maradjon az AI-nak és a GPU-nak!
             uint32_t hw_threads = std::thread::hardware_concurrency();
-            num_threads = std::min<uint32_t>(6, std::max<uint32_t>(2, hw_threads / 2));
+            num_threads = std::min<uint32_t>(6, std::max<uint32_t>(2, hw_threads / 2)); // Magok fele, de max 6.
             
             chunk_hist.resize(num_threads * 16, std::vector<uint32_t>(2048, 0));
             auto on_completion = []() noexcept {}; 
-            sync_point = new std::barrier<std::function<void()>>(num_threads + 1, on_completion); // +1 a Main szálnak!
+            sync_point = new std::barrier<std::function<void()>>(num_threads + 1, on_completion); // +1 a Vezérlőnek
 
             for (uint32_t i = 0; i < num_threads; ++i) {
                 workers.emplace_back(&MutationPipeline::WorkerLoop, this, i);
@@ -199,15 +224,15 @@ namespace NF::Core {
         }
 
         ~MutationPipeline() {
-            current_phase.store(JobPhase::SHUTDOWN);
+            current_phase.store(JobPhase::SHUTDOWN, std::memory_order_release);
             sync_point->arrive_and_wait();
             for (auto& t : workers) t.join();
             delete sync_point;
         }
 
         template <typename T>
-        void ExecutePhase(std::vector<SortItem>& items, std::vector<SortItem>& aux, const std::vector<T>& src, std::vector<T>& dst) {
-            job_n = items.size();
+        void ExecutePhase(std::vector<SortItem>& items, std::vector<SortItem>& aux, const std::vector<T>& src, std::vector<T>& dst, size_t valid_count) {
+            job_n = valid_count;
             if (job_n == 0) return;
 
             p_in = items.data(); p_out = aux.data();
@@ -216,15 +241,15 @@ namespace NF::Core {
             NUM_CHUNKS = std::min<size_t>(num_threads * 16, std::max<size_t>(num_threads, job_n / 40000));
             chunk_size = (job_n + NUM_CHUNKS - 1) / NUM_CHUNKS;
 
-            if constexpr (std::is_same_v<T, MoveCommand_Deletion>) current_phase.store(JobPhase::SORT_DEL);
-            else if constexpr (std::is_same_v<T, MoveCommand_Liquid>) current_phase.store(JobPhase::SORT_LIQ);
-            else if constexpr (std::is_same_v<T, MoveCommand_Block>) current_phase.store(JobPhase::SORT_BLK);
+            if constexpr (std::is_same_v<T, MoveCommand_Deletion>) current_phase.store(JobPhase::SORT_DEL, std::order_release);
+            else if constexpr (std::is_same_v<T, MoveCommand_Liquid>) current_phase.store(JobPhase::SORT_LIQ, std::order_release);
+            else if constexpr (std::is_same_v<T, MoveCommand_Block>) current_phase.store(JobPhase::SORT_BLK, std::order_release);
 
-            sync_point->arrive_and_wait(); // Ébresztő a Workereknek!
-            sync_point->arrive_and_wait(); // Várakozás, amíg végeznek!
+            sync_point->arrive_and_wait(); // 1. Munkások felébresztése
+            sync_point->arrive_and_wait(); // 2. Várakozás amíg végeznek
             
-            _mm_sfence(); // Memória szinkronizáció
-            current_phase.store(JobPhase::SLEEP);
+            _mm_sfence(); // Biztonsági zár (Non-Temporal Flush)
+            current_phase.store(JobPhase::SLEEP, std::memory_order_release);
         }
     };
 }
