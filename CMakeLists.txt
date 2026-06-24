@@ -14,7 +14,9 @@ add_executable(NexusForge main.cpp
         Core/MutationPipeline.hpp
         Core/MacroChunk.hpp
         Core/BlockPlacement.hpp
-        Render/VulkanSwapchain.hpp)
+        Render/VulkanSwapchain.hpp
+        Render/VulkanRenderer.hpp
+        Render/VulkanCommandManager.hpp)
 
 # Így a fordító megtalálja a D:/VULKAN/Include/vulkan/vulkan.h fájlt
 target_include_directories(NexusForge PUBLIC
