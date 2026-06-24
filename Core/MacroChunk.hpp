@@ -85,6 +85,10 @@ namespace NF::Core {
         MacroChunk_Small() {
             tickNow   = data_BufferA.data();
             tickAfter = data_BufferB.data();
+
+            // --- EZZEL A KÉT SORRAL MEGJAVUL A VILÁG ---
+            PaletteMask[0] = 1ULL; // A 0. bitet (Levegő) fixen lefoglaljuk!
+            activePaletteSize = 1; // 1 elem már a palettán van.
         }
 
         void SwapTickBuffers() { std::swap(tickNow, tickAfter); }

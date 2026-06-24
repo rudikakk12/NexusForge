@@ -38,6 +38,7 @@ public:
     }
 };
 
+// A tesztvilág lokális chunkjait tároló tömb (8x8x2 = 128 aktív chunk fér el benne)
 static std::vector<MacroChunk_Small> realWorld(200);
 
 class O1_PhysicsArbiter {
@@ -59,7 +60,13 @@ public:
                 for (size_t i = start; i < end; ++i) {
                     auto& cmd = commands[i];
                     if ((cmd.flags & FLAG_REJECTED) == 0 && cmd.targetGridID > 0) {
-                        auto& tgtChunk = realWorld[cmd.targetGridID];
+
+                        // JAVÍTÁS: Mivel a targetGridID egy óriási NexusRegion (pl. 1), a chunkot a parancsban
+                        // tárolt relatív chunk-koordináták (tgtChunkX, Y, Z) alapján keressük meg a realWorld-ben.
+                        int ly = (cmd.tgtChunkY == 0) ? 0 : 1; // Visszafejtjük az Y indexet (0 vagy 1) a mentett 0/-1 értékekből
+                        uint32_t chunkIndex = cmd.tgtChunkX + (cmd.tgtChunkZ * 8) + (ly * 64);
+
+                        auto& tgtChunk = realWorld[chunkIndex];
                         bool isAir = (tgtChunk.tickAfter[cmd.tgtLocalIndex] == AIR_PALETTE_INDEX_8);
                         bool canOverwrite = (cmd.flags & FLAG_OVERWRITE_SOLID);
                         if (isAir || canOverwrite) {
@@ -85,7 +92,6 @@ int main() {
     std::vector<MoveCommand_Block> blk_src, blk_dst;
     std::vector<SortItem> items, aux;
 
-    // Csak a forrás tömböket foglaljuk le előre, biztos ami biztos alapon 1 MILLIÓRA!
     blk_src.reserve(1000000);
     items.reserve(1000000);
 
@@ -94,10 +100,15 @@ int main() {
 
     std::cout << "[PHASE 1] 128 Chunk generalasa... ";
 
+    // JAVÍTÁS: Az egész generált tesztvilág egyetlen egyedi NexusRegion egységbe (GridID = 1) tartozik!
+    constexpr uint32_t currentNexusRegionID = 1;
+
     for (int cx = 0; cx < 8; ++cx) {
         for (int cz = 0; cz < 8; ++cz) {
             for (int cy = 0; cy < 2; ++cy) {
-                uint32_t gridID = 1 + cx + (cz * 8) + (cy * 64);
+
+                // A memóriatömbben való elhelyezéshez egy lokális, lapos indexet használunk térbeli leképezéssel
+                uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
 
                 for (int z = 0; z < 16; ++z) {
                     for (int x = 0; x < 16; ++x) {
@@ -121,7 +132,7 @@ int main() {
 
                             if (blockID != 0) {
                                 MoveCommand_Block cmd{};
-                                cmd.targetGridID = gridID;
+                                cmd.targetGridID = currentNexusRegionID; // Azonos bejegyzés az egész régiónak/űrhajónak
                                 cmd.tgtChunkX = cx;
                                 cmd.tgtChunkY = (cy == 0) ? 0 : -1;
                                 cmd.tgtChunkZ = cz;
@@ -144,7 +155,6 @@ int main() {
     size_t tick_blocks = blk_src.size();
     std::cout << "Kesz. (" << tick_blocks << " aktiv blokk a memoriaban!)\n";
 
-    // JAVÍTÁS: Itt dinamikusan állítjuk be a Cél tömböket, hogy PONTOSAN akkorák legyenek, mint a generált blokkok!
     blk_dst.resize(tick_blocks);
     aux.resize(tick_blocks);
 
@@ -162,10 +172,12 @@ int main() {
     for (int cx = 0; cx < 8; ++cx) {
         for (int cz = 0; cz < 8; ++cz) {
             for (int cy = 0; cy < 2; ++cy) {
-                uint32_t gridID = 1 + cx + (cz * 8) + (cy * 64);
+
+                // JAVÍTÁS: A realWorld struktúrából a koordináták alapján felépített lokális indexszel szedjük ki a chunkokat
+                uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
                 int offsetY = (cy == 0) ? 0 : -1;
 
-                auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(realWorld[gridID], cx, offsetY, cz);
+                auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(realWorld[chunkIndex], cx, offsetY, cz);
 
                 uint32_t indexOffset = static_cast<uint32_t>(worldMesh.vertices.size());
                 worldMesh.vertices.insert(worldMesh.vertices.end(), chunkMesh.vertices.begin(), chunkMesh.vertices.end());

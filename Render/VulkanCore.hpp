@@ -9,6 +9,10 @@
 #include <vector>
 #include <cstdlib>
 #include <array>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
+#include <algorithm>
 
 #include "VulkanCommandManager.hpp"
 #include "VulkanRenderer.hpp"
@@ -67,6 +71,20 @@ namespace NF::Render {
         float deltaTime = 0.0f;
         float lastFrame = 0.0f;
 
+        // --- ÚJ: TELEMETRIA ÉS STATISZTIKAI VÁLTOZÓK ---
+        bool telemetryMenuOpen = true;             // F3-mal kapcsolható HUD állapota
+        uint64_t totalFrames = 0;                  // A motor indulása óta renderelt összes képkocka
+        float totalTimeElapsed = 0.0f;             // A motor indulása óta eltelt összes idő
+        float bestFrameTime = 999999.0f;           // Legjobb (legalacsonyabb) képkockaidő
+        float worstFrameTime = 0.0f;               // Legrosszabb (legmagasabb) képkockaidő
+        float telemetryLogTimer = 0.0f;            // A konzol frissítési ütemezője (250ms)
+
+        uint64_t menuOpenFrames = 0;               // Hány képkocka futott le a menü megnyitása óta
+        float menuOpenTimeElapsed = 0.0f;          // Mennyi idő telt el a menü megnyitása óta
+
+        // Időbélyeg-FrameTime párosok a gördülő 1s és 10s átlagok kiszámításához
+        std::vector<std::pair<float, float>> frameHistory;
+
         void initWindow() {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
@@ -89,15 +107,11 @@ namespace NF::Render {
         }
 
         void createRenderPass() {
-            // A legáltalánosabban támogatott 32 bites Depth formátumot használjuk
             renderPass = NF::Render::VulkanPipeline::CreateRenderPass(device, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_D32_SFLOAT);
         }
 
-        // --- ÚJ: Mélység Memória Lefoglalása ---
         void createDepthResources() {
             VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
-
-            // 1. A VRAM lefoglalása
             VkImageCreateInfo imageInfo{};
             imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -126,7 +140,6 @@ namespace NF::Render {
             if (vkAllocateMemory(device, &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS) throw std::runtime_error("Hiba a Depth memoria foglalasakor!");
             vkBindImageMemory(device, depthImage, depthImageMemory, 0);
 
-            // 2. A Nézet (View) létrehozása a GPU-nak
             VkImageViewCreateInfo viewInfo{};
             viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             viewInfo.image = depthImage;
@@ -144,7 +157,6 @@ namespace NF::Render {
         void createFramebuffers() {
             swapChainFramebuffers.resize(swapChainImageViews.size());
             for (size_t i = 0; i < swapChainImageViews.size(); i++) {
-                // A Framebuffer ezentúl 2 képet vár: A Színt és a Távolságot (Depth)
                 std::array<VkImageView, 2> attachments = {
                     swapChainImageViews[i],
                     depthImageView
@@ -167,8 +179,8 @@ namespace NF::Render {
         void initVulkan() {
             createInstance(); createSurface(); pickPhysicalDevice(); createLogicalDevice(); createSwapChain(); createImageViews();
             createRenderPass();
-            createDepthResources(); // <-- Létrehozzuk a láthatatlan mélységtérképet
-            createFramebuffers();   // <-- Belerakjuk a keretbe
+            createDepthResources();
+            createFramebuffers();
             createGraphicsPipeline(); createCommandPool(); createCommandBuffers(); createSyncObjects();
             createVertexAndIndexBuffers();
             std::cout << "[Vulkan] Motor inicializalva, Z-Buffer ON!" << std::endl;
@@ -176,13 +188,29 @@ namespace NF::Render {
 
         void processInput() {
             if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, true);
-            float cameraSpeed = 60.0f * deltaTime; // 20-ról 60-ra emelve, hogy haladjunk is!
+            float cameraSpeed = 60.0f * deltaTime;
             if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) cameraPos = cameraPos + cameraFront * cameraSpeed;
             if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) cameraPos = cameraPos - cameraFront * cameraSpeed;
             if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cameraPos = cameraPos - cameraFront.cross(cameraUp).normalize() * cameraSpeed;
             if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cameraPos = cameraPos + cameraFront.cross(cameraUp).normalize() * cameraSpeed;
             if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) cameraPos = cameraPos + cameraUp * cameraSpeed;
             if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) cameraPos = cameraPos - cameraUp * cameraSpeed;
+
+            // --- ÚJ: F3 BILLENTYŰ KEZELÉSE A HUD KI-BE KAPCSOLÁSÁHOZ (DEBOUNCE-OLVA) ---
+            static bool f3PressedLastFrame = false;
+            bool f3PressedNow = (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
+            if (f3PressedNow && !f3PressedLastFrame) {
+                telemetryMenuOpen = !telemetryMenuOpen;
+                if (telemetryMenuOpen) {
+                    // Ha megnyitjuk a menüt, nullázzuk a hozzá tartozó időt és frame számlálót
+                    menuOpenFrames = 0;
+                    menuOpenTimeElapsed = 0.0f;
+                } else {
+                    // Ha bezárjuk, töröljük a konzolt egy tiszta befejezésért
+                    std::cout << "\033[2J\033[H Konzolos HUD kikapcsolva. [F3] a visszakapcsoláshoz.\n";
+                }
+            }
+            f3PressedLastFrame = f3PressedNow;
 
             double xpos, ypos; glfwGetCursorPos(window, &xpos, &ypos);
             if (firstMouse) { lastX = xpos; lastY = ypos; firstMouse = false; }
@@ -192,6 +220,94 @@ namespace NF::Render {
             if (pitch > 89.0f) pitch = 89.0f; if (pitch < -89.0f) pitch = -89.0f;
             Vec3 front; front.x = cos(yaw * (M_PI/180.0)) * cos(pitch * (M_PI/180.0)); front.y = sin(pitch * (M_PI/180.0)); front.z = sin(yaw * (M_PI/180.0)) * cos(pitch * (M_PI/180.0));
             cameraFront = front.normalize();
+        }
+
+        // --- ÚJ: METRIKÁK KISZÁMÍTÁSA ÉS ÉLŐ FRISSÍTÉSE ---
+        void updateTelemetryMetrics(float dt) {
+            totalFrames++;
+            totalTimeElapsed += dt;
+
+            // Az első 10 képkockát kihagyjuk a mérésből, mert az inicializálási tüske elrontaná a Best értéket
+            if (totalFrames > 10) {
+                if (dt < bestFrameTime) bestFrameTime = dt;
+                if (dt > worstFrameTime) worstFrameTime = dt;
+            }
+
+            // Ha nincs nyitva a telemetria panel, nem pazarolunk CPU ciklust a számításokra
+            if (!telemetryMenuOpen) return;
+
+            menuOpenFrames++;
+            menuOpenTimeElapsed += dt;
+
+            float currentTimestamp = totalTimeElapsed;
+            frameHistory.push_back({currentTimestamp, dt});
+
+            // Tisztítjuk a 10 másodpercnél régebbi mintákat a memóriából
+            while (!frameHistory.empty() && (currentTimestamp - frameHistory.front().first > 10.0f)) {
+                frameHistory.erase(frameHistory.begin());
+            }
+
+            telemetryLogTimer += dt;
+            if (telemetryLogTimer >= 0.20f) { // 200 ms-enként (másodpercenként 5x) frissítjük a kijelzőt
+                telemetryLogTimer = 0.0f;
+
+                float avg1s = 0.0f;
+                float avg10s = 0.0f;
+                size_t count1s = 0;
+                size_t count10s = 0;
+
+                for (const auto& record : frameHistory) {
+                    if (currentTimestamp - record.first <= 1.0f) {
+                        avg1s += record.second;
+                        count1s++;
+                    }
+                    if (currentTimestamp - record.first <= 10.0f) {
+                        avg10s += record.second;
+                        count10s++;
+                    }
+                }
+
+                avg1s = (count1s > 0) ? (avg1s / count1s) : dt;
+                avg10s = (count10s > 0) ? (avg10s / count10s) : dt;
+                float avgMenu = (menuOpenFrames > 0) ? (menuOpenTimeElapsed / menuOpenFrames) : dt;
+
+                // --- KOORDINÁTA TRANSZFORMÁCIÓK AZ ARCHITEKTÚRA ALAPJÁN ---
+                // GridID: Ez a 256x256x256-os óriási NexusRegion (Fixen 1 a tesztben)
+                uint32_t currentGridID = 1;
+
+                // Global Chunk X,Y,Z (A chunkok 16x16x16 méretűek)
+                int64_t gcx = static_cast<int64_t>(std::floor(cameraPos.x / 16.0f));
+                int64_t gcy = static_cast<int64_t>(std::floor(cameraPos.y / 16.0f));
+                int64_t gcz = static_cast<int64_t>(std::floor(cameraPos.z / 16.0f));
+
+                // Local Chunk X,Y,Z (A blokk pontos indexpozíciója az adott chunkon belül, kezelve a negatív terepet)
+                int lcx = static_cast<int>(std::floor(cameraPos.x)) % 16; if (lcx < 0) lcx += 16;
+                int lcy = static_cast<int>(std::floor(cameraPos.y)) % 16; if (lcy < 0) lcy += 16;
+                int lcz = static_cast<int>(std::floor(cameraPos.z)) % 16; if (lcz < 0) lcz += 16;
+
+                // ANSI Escape kódok: \033[2J letörli a képernyőt, \033[H a kurzort a bal felső sarokba teszi (nincs villogás)
+                std::cout << "\033[2J\033[H";
+                std::cout << "==================================================================\n";
+                std::cout << "               NEXUSFORGE TITAN ENGINE TELEMETRY PANEL             \n";
+                std::cout << "==================================================================\n";
+                std::cout << " [POSITION & WORLD METRICS]\n";
+                std::cout << "  NexusRegion (GridID)   : " << currentGridID << " (256x256x256 region scale)\n";
+                std::cout << "  Global Player X,Y,Z    : [" << std::fixed << std::setprecision(3) << cameraPos.x << ", " << cameraPos.y << ", " << cameraPos.z << "]\n";
+                std::cout << "  Global Chunk X,Y,Z     : [" << gcx << ", " << gcy << ", " << gcz << "]\n";
+                std::cout << "  Local Chunk (Block)    : [" << lcx << ", " << lcy << ", " << lcz << "] (inside 16^3 chunk)\n";
+                std::cout << "  Camera Orientation     : Yaw: " << std::setprecision(1) << yaw << " | Pitch: " << pitch << "\n";
+                std::cout << "------------------------------------------------------------------\n";
+                std::cout << " [PERFORMANCE & FRAMETIME METRICS]\n";
+                std::cout << "  Current Performance    : " << static_cast<int>(1.0f / (dt > 0.0f ? dt : 0.001f)) << " FPS\n";
+                std::cout << "  FrameTime (Current)    : " << std::setprecision(2) << dt * 1000.0f << " ms\n";
+                std::cout << "  FrameTime Avg (1 sec)  : " << avg1s * 1000.0f << " ms\n";
+                std::cout << "  FrameTime Avg (10 sec) : " << avg10s * 1000.0f << " ms\n";
+                std::cout << "  FrameTime Avg (Menu)   : " << avgMenu * 1000.0f << " ms (since open)\n";
+                std::cout << "  FrameTime (Best)       : " << (bestFrameTime == 999999.0f ? 0.0f : bestFrameTime * 1000.0f) << " ms\n";
+                std::cout << "  FrameTime (Worst)      : " << worstFrameTime * 1000.0f << " ms\n";
+                std::cout << "==================================================================\n";
+                std::cout << " Tipp: Nyomj [F3]-at a konzolos HUD elrejtesehez/megnyitashaz." << std::endl;
+            }
         }
 
     public:
@@ -205,13 +321,15 @@ namespace NF::Render {
             while (!glfwWindowShouldClose(window)) {
                 float currentFrame = glfwGetTime(); deltaTime = currentFrame - lastFrame; lastFrame = currentFrame;
                 glfwPollEvents(); processInput(); drawFrame();
+
+                // --- ÚJ: A PARANCSOK UTÁN FRISSÍTJÜK A METRIKÁKAT ---
+                updateTelemetryMetrics(deltaTime);
             }
         }
 
         void cleanup() {
             vkDeviceWaitIdle(device);
 
-            // ÚJ: Töröljük a Z-Buffert kilépéskor
             vkDestroyImageView(device, depthImageView, nullptr);
             vkDestroyImage(device, depthImage, nullptr);
             vkFreeMemory(device, depthImageMemory, nullptr);
@@ -234,11 +352,6 @@ namespace NF::Render {
             renderPassInfo.renderPass = renderPass;
             renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
             renderPassInfo.renderArea.extent = swapChainExtent;
-
-            // --- ÚJ: A Törlés (Clear) most már 2 dolgot végez ---
-            // 1. Törli a színt (Égszínkékre)
-            // 2. Törli a távolságot (1.0f a maximum távolság)
-
 
             std::array<VkClearValue, 2> clearValues{};
             clearValues[0].color = VkClearColorValue{0.05f, 0.6f, 0.8f, 1.0f};

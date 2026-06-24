@@ -45,8 +45,8 @@ namespace NF::Render {
             return voxels[GetIndex(x, y, z)] == 0;
         }
 
-        // ÚJ PARAMÉTEREK: offsetX, offsetY, offsetZ
-        static void AddFace(MeshData& mesh, int x, int y, int z, int faceDir, uint8_t paletteID, int offsetX, int offsetY, int offsetZ) {
+        // JAVÍTVA: A paletteID típusa uint8_t-ről uint32_t-re cserélve (Globális ID), hogy a Vertex struktúrának és a Shadernek is megfeleljen
+        static void AddFace(MeshData& mesh, int x, int y, int z, int faceDir, uint32_t globalPaletteID, int offsetX, int offsetY, int offsetZ) {
             uint32_t v_idx = static_cast<uint32_t>(mesh.vertices.size());
 
             float nx = 0, ny = 0, nz = 0; float v[4][3];
@@ -66,7 +66,7 @@ namespace NF::Render {
             float gz = (float)z + (offsetZ * 16.0f);
 
             for(int i = 0; i < 4; ++i) {
-                mesh.vertices.push_back({ gx + v[i][0], gy + v[i][1], gz + v[i][2], nx, ny, nz, paletteID });
+                mesh.vertices.push_back({ gx + v[i][0], gy + v[i][1], gz + v[i][2], nx, ny, nz, globalPaletteID });
             }
 
             mesh.indices.push_back(v_idx + 0); mesh.indices.push_back(v_idx + 1); mesh.indices.push_back(v_idx + 2);
@@ -84,14 +84,20 @@ namespace NF::Render {
             for (int z = 0; z < 16; ++z) {
                 for (int y = 0; y < 16; ++y) {
                     for (int x = 0; x < 16; ++x) {
-                        uint8_t voxelID = voxels[GetIndex(x, y, z)];
-                        if (voxelID == 0) continue;
-                        if (IsTransparent(voxels, x, y + 1, z)) AddFace(mesh, x, y, z, 0, voxelID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y - 1, z)) AddFace(mesh, x, y, z, 1, voxelID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x + 1, y, z)) AddFace(mesh, x, y, z, 2, voxelID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x - 1, y, z)) AddFace(mesh, x, y, z, 3, voxelID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y, z + 1)) AddFace(mesh, x, y, z, 4, voxelID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y, z - 1)) AddFace(mesh, x, y, z, 5, voxelID, offsetX, offsetY, offsetZ);
+                        uint8_t localVoxelID = voxels[GetIndex(x, y, z)];
+                        if (localVoxelID == 0) continue;
+
+                        // JAVÍTÁS: A voxels[] a chunk LOKÁLIS paletta indexét tartalmazza.
+                        // A Shadernek viszont a GLOBÁLIS BlockStateID-ra van szüksége a helyes színezéshez.
+                        // Ezért kikeressük a globális ID-t a chunk palettájából a lokális azonosító alapján!
+                        uint32_t globalID = chunk.PaletteGlobalBlockStateIDs[localVoxelID];
+
+                        if (IsTransparent(voxels, x, y + 1, z)) AddFace(mesh, x, y, z, 0, globalID, offsetX, offsetY, offsetZ);
+                        if (IsTransparent(voxels, x, y - 1, z)) AddFace(mesh, x, y, z, 1, globalID, offsetX, offsetY, offsetZ);
+                        if (IsTransparent(voxels, x + 1, y, z)) AddFace(mesh, x, y, z, 2, globalID, offsetX, offsetY, offsetZ);
+                        if (IsTransparent(voxels, x - 1, y, z)) AddFace(mesh, x, y, z, 3, globalID, offsetX, offsetY, offsetZ);
+                        if (IsTransparent(voxels, x, y, z + 1)) AddFace(mesh, x, y, z, 4, globalID, offsetX, offsetY, offsetZ);
+                        if (IsTransparent(voxels, x, y, z - 1)) AddFace(mesh, x, y, z, 5, globalID, offsetX, offsetY, offsetZ);
                     }
                 }
             }
