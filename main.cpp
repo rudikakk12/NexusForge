@@ -38,8 +38,43 @@ public:
     }
 };
 
-// A tesztvilág lokális chunkjait tároló tömb (8x8x2 = 128 aktív chunk fér el benne)
-static std::vector<MacroChunk_Small> realWorld(200);
+std::vector<MacroChunk_Small> realWorld(200);
+
+// Globális mutató a VulkanCore-ra a remesheléshez
+NF::Render::VulkanCore* globalVulkanApp = nullptr;
+
+// --- BLOKK KIÜTÉS ---
+void BreakBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz) {
+    int cx = gx >> 4; int cy = gy >> 4; int cz = gz >> 4;
+    if (cx < 0 || cx >= 8 || cy < 0 || cy >= 2 || cz < 0 || cz >= 8) return;
+
+    uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
+    int lx = gx & 15; int ly = gy & 15; int lz = gz & 15;
+    uint32_t localIndex = lx + (ly * 16) + (lz * 256);
+
+    realWorld[chunkIndex].tickNow[localIndex] = AIR_PALETTE_INDEX_8;
+    realWorld[chunkIndex].tickAfter[localIndex] = AIR_PALETTE_INDEX_8;
+
+    std::cout << "[Fizika] Blokk Kitorve! Koordinata: X:" << gx << " Y:" << gy << " Z:" << gz << "\n";
+    // MDI varázslat: Csak ezt a chunkot küldjük át a Mega-Bufferbe!
+    if (globalVulkanApp) globalVulkanApp->UpdateSingleChunk(chunkIndex, cx, cy, cz);
+}
+
+void PlaceBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz, uint8_t blockID) {
+    int cx = gx >> 4; int cy = gy >> 4; int cz = gz >> 4;
+    if (cx < 0 || cx >= 8 || cy < 0 || cy >= 2 || cz < 0 || cz >= 8) return;
+
+    uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
+    int lx = gx & 15; int ly = gy & 15; int lz = gz & 15;
+    uint32_t localIndex = lx + (ly * 16) + (lz * 256);
+
+    realWorld[chunkIndex].tickNow[localIndex] = blockID;
+    realWorld[chunkIndex].tickAfter[localIndex] = blockID;
+
+    std::cout << "[Fizika] Blokk Lerakva! ID: " << (int)blockID << " | Koordinata: X:" << gx << " Y:" << gy << " Z:" << gz << "\n";
+    // Csak 1 chunk újrameshelése
+    if (globalVulkanApp) globalVulkanApp->UpdateSingleChunk(chunkIndex, cx, cy, cz);
+}
 
 class O1_PhysicsArbiter {
 public:
@@ -60,12 +95,7 @@ public:
                 for (size_t i = start; i < end; ++i) {
                     auto& cmd = commands[i];
                     if ((cmd.flags & FLAG_REJECTED) == 0 && cmd.targetGridID > 0) {
-
-                        // JAVÍTÁS: Mivel a targetGridID egy óriási NexusRegion (pl. 1), a chunkot a parancsban
-                        // tárolt relatív chunk-koordináták (tgtChunkX, Y, Z) alapján keressük meg a realWorld-ben.
-                        int ly = (cmd.tgtChunkY == 0) ? 0 : 1; // Visszafejtjük az Y indexet (0 vagy 1) a mentett 0/-1 értékekből
-                        uint32_t chunkIndex = cmd.tgtChunkX + (cmd.tgtChunkZ * 8) + (ly * 64);
-
+                        uint32_t chunkIndex = cmd.tgtChunkX + (cmd.tgtChunkZ * 8) + (cmd.tgtChunkY * 64);
                         auto& tgtChunk = realWorld[chunkIndex];
                         bool isAir = (tgtChunk.tickAfter[cmd.tgtLocalIndex] == AIR_PALETTE_INDEX_8);
                         bool canOverwrite = (cmd.flags & FLAG_OVERWRITE_SOLID);
@@ -100,14 +130,12 @@ int main() {
 
     std::cout << "[PHASE 1] 128 Chunk generalasa... ";
 
-    // JAVÍTÁS: Az egész generált tesztvilág egyetlen egyedi NexusRegion egységbe (GridID = 1) tartozik!
     constexpr uint32_t currentNexusRegionID = 1;
 
     for (int cx = 0; cx < 8; ++cx) {
         for (int cz = 0; cz < 8; ++cz) {
             for (int cy = 0; cy < 2; ++cy) {
 
-                // A memóriatömbben való elhelyezéshez egy lokális, lapos indexet használunk térbeli leképezéssel
                 uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
 
                 for (int z = 0; z < 16; ++z) {
@@ -120,21 +148,19 @@ int main() {
                         for (int y = 0; y < 16; ++y) {
                             uint32_t blockID = 0;
 
-                            if (cy == 1) {
-                                // ALSÓ CHUNK: Tömör szikla (ID 3)
+                            if (cy == 0) {
                                 blockID = 3;
                             } else {
-                                // FELSŐ CHUNK
-                                if (y == height) blockID = 2; // Fű
-                                else if (y < height && y >= height - 3) blockID = 1; // Föld
-                                else if (y < height - 3) blockID = 3; // Kő
+                                if (y == height) blockID = 2;
+                                else if (y < height && y >= height - 3) blockID = 1;
+                                else if (y < height - 3) blockID = 3;
                             }
 
                             if (blockID != 0) {
                                 MoveCommand_Block cmd{};
-                                cmd.targetGridID = currentNexusRegionID; // Azonos bejegyzés az egész régiónak/űrhajónak
+                                cmd.targetGridID = currentNexusRegionID;
                                 cmd.tgtChunkX = cx;
-                                cmd.tgtChunkY = (cy == 0) ? 0 : -1;
+                                cmd.tgtChunkY = cy;
                                 cmd.tgtChunkZ = cz;
                                 cmd.tgtLocalIndex = x + (y * 16) + (z * 256);
                                 cmd.targetPaletteIndex = blockID;
@@ -164,38 +190,14 @@ int main() {
     O1_PhysicsArbiter::ResolveConflictsParallel(blk_dst, tick_blocks, active_threads);
     PhysicsEngine::CommitTargetsParallel(blk_dst, tick_blocks, active_threads);
 
-    std::cout << "[PHASE 5] Globalis MESH epitese 128 chunkbol... ";
-    NF::Render::MeshData worldMesh;
-    worldMesh.vertices.reserve(1000000);
-    worldMesh.indices.reserve(3000000);
-
-    for (int cx = 0; cx < 8; ++cx) {
-        for (int cz = 0; cz < 8; ++cz) {
-            for (int cy = 0; cy < 2; ++cy) {
-
-                // JAVÍTÁS: A realWorld struktúrából a koordináták alapján felépített lokális indexszel szedjük ki a chunkokat
-                uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
-                int offsetY = (cy == 0) ? 0 : -1;
-
-                auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(realWorld[chunkIndex], cx, offsetY, cz);
-
-                uint32_t indexOffset = static_cast<uint32_t>(worldMesh.vertices.size());
-                worldMesh.vertices.insert(worldMesh.vertices.end(), chunkMesh.vertices.begin(), chunkMesh.vertices.end());
-                for (uint32_t idx : chunkMesh.indices) {
-                    worldMesh.indices.push_back(idx + indexOffset);
-                }
-            }
-        }
-    }
-    std::cout << worldMesh.vertices.size() << " vertex legenerálva.\n";
+    NF::Render::VulkanCore app;
+    globalVulkanApp = &app; // Rákötjük a globális mutatót
 
     std::cout << "====================================================\n";
     std::cout << " GPU RENDER INDITASA\n";
     std::cout << "====================================================\n";
 
-    NF::Render::VulkanCore app;
     try {
-        app.loadMesh(worldMesh);
         app.run();
     } catch (const std::exception& e) {
         std::cerr << "CRASH: " << e.what() << std::endl;
