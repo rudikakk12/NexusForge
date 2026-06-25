@@ -498,10 +498,15 @@ namespace NF::Render {
                 int64_t gcx = static_cast<int64_t>(std::floor(cameraPos.x / 16.0f)); int64_t gcy = static_cast<int64_t>(std::floor(cameraPos.y / 16.0f)); int64_t gcz = static_cast<int64_t>(std::floor(cameraPos.z / 16.0f));
                 ImGui::SetNextWindowBgAlpha(0.85f);
                 ImGui::Begin("NexusForge Telemetry", &telemetryMenuOpen, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "WORLD METRICS"); ImGui::Separator();
-                ImGui::Text("Grid ID: 1"); ImGui::Text("Global: X: %lld, Y: %lld, Z: %lld", gcx, gcy, gcz); ImGui::Text("Camera: Yaw: %.1f, Pitch: %.1f", yaw, pitch); ImGui::Text("Fly Mode: %s", player.isFlying ? "ON" : "OFF"); ImGui::Spacing();
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "PERFORMANCE"); ImGui::Separator();
-                ImGui::Text("FPS: %d", static_cast<int>(1.0f / (deltaTime > 0.0f ? deltaTime : 0.001f))); ImGui::Text("FrameTime (Current): %.2f ms", deltaTime * 1000.0f); ImGui::Text("Draw Commands: %d", megaArena.currentCommandCount.load());
+                ImGui::Text("FPS: %d", static_cast<int>(1.0f / (deltaTime > 0.0f ? deltaTime : 0.001f)));
+                ImGui::Text("FrameTime (Current): %.2f ms", deltaTime * 1000.0f);
+                // IDE JÖNNEK VISSZA A HIÁNYZÓ ADATOK:
+                ImGui::Text("FrameTime (1s Avg): %.2f ms", avg1s * 1000.0f);
+                ImGui::Text("FrameTime (10s Avg): %.2f ms", avg10s * 1000.0f);
+                ImGui::Text("Best Frame: %.2f ms", (bestFrameTime == 999999.0f ? 0.0f : bestFrameTime * 1000.0f));
+                ImGui::Text("Worst Frame: %.2f ms", worstFrameTime * 1000.0f);
+                ImGui::Text("Draw Commands: %d", megaArena.currentCommandCount.load());
                 ImGui::End();
             }
 
