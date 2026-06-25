@@ -1,16 +1,11 @@
-//
-// Fájl: Core/Physics.hpp
-// Készítette: NexusForge Engine (Rick & Gem)
-//
 #pragma once
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
 #include <vector>
 #include "MacroChunk.hpp"
+#include "World.hpp" // <-- ÚJ BEILLESZTÉS
 #include "../Render/CameraMath.hpp"
-
-extern std::vector<NF::Core::MacroChunk_Small> realWorld;
 
 namespace NF::Core::Physics {
 
@@ -23,18 +18,22 @@ namespace NF::Core::Physics {
         int32_t cy = gy >> 4;
         int32_t cz = gz >> 4;
 
-        if (cy >= 2) return false;
+        if (cy >= 4) return false;
         if (cy < 0) return true;
-        if (cx < 0 || cx >= 8 || cz < 0 || cz >= 8) return true;
 
-        uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
-        int32_t lx = gx & 15;
-        int32_t ly = gy & 15;
-        int32_t lz = gz & 15;
+        // Kikeressük a Hash Mapből, hogy létezik-e a chunk!
+        uint64_t hash = NF::Core::GetChunkHash(cx, cy, cz);
+        auto it = NF::Core::realWorld.find(hash);
+
+        // Ha nincs betöltve a chunk, levegőnek tekintjük (hogy át tudjunk repülni rajta)
+        if (it == NF::Core::realWorld.end()) return false;
+
+        int32_t lx = gx & 15; int32_t ly = gy & 15; int32_t lz = gz & 15;
         uint32_t localIndex = lx + (ly * 16) + (lz * 256);
 
-        return realWorld[chunkIndex].tickAfter[localIndex] != 0;
+        return it->second->tickAfter[localIndex] != 0;
     }
+    // ... A FÁJL TÖBBI RÉSZE MARAD VÁLTOZATLAN ...
 
     struct RaycastResult {
         bool hit;

@@ -8,7 +8,6 @@
 
 namespace NF::Render {
     
-    // 3D Vektor a mozgáshoz
     struct Vec3 {
         float x, y, z;
         Vec3 operator+(const Vec3& o) const { return {x+o.x, y+o.y, z+o.z}; }
@@ -27,16 +26,15 @@ namespace NF::Render {
         }
     };
 
-    // 4x4-es Mátrix a Kamera forgatásához és a 3D illúzióhoz
     struct Mat4 {
-        float m[4][4] = {{0}}; // Oszlop-major elrendezés (Ahogy a GPU szereti)
-        
+        float m[4][4] = {{0}};
+
         static Mat4 identity() {
             Mat4 res;
             res.m[0][0] = 1; res.m[1][1] = 1; res.m[2][2] = 1; res.m[3][3] = 1;
             return res;
         }
-        
+
         Mat4 operator*(const Mat4& o) const {
             Mat4 res;
             for(int c=0; c<4; ++c)
@@ -44,7 +42,7 @@ namespace NF::Render {
                     res.m[c][r] = m[0][r]*o.m[c][0] + m[1][r]*o.m[c][1] + m[2][r]*o.m[c][2] + m[3][r]*o.m[c][3];
             return res;
         }
-        
+
         static Mat4 lookAt(Vec3 eye, Vec3 center, Vec3 up) {
             Vec3 f = (center - eye).normalize();
             Vec3 s = f.cross(up).normalize();
@@ -58,16 +56,54 @@ namespace NF::Render {
             res.m[3][2] = f.dot(eye);
             return res;
         }
-        
+
         static Mat4 perspective(float fovY, float aspect, float zNear, float zFar) {
             float tanHalfFovy = std::tan(fovY / 2.0f);
             Mat4 res;
             res.m[0][0] = 1.0f / (aspect * tanHalfFovy);
-            res.m[1][1] = -1.0f / (tanHalfFovy); // A Vulkan fejjel lefelé van az OpenGL-hez képest, itt fordítjuk meg!
+            res.m[1][1] = -1.0f / (tanHalfFovy);
             res.m[2][2] = zFar / (zNear - zFar);
             res.m[2][3] = -1.0f;
             res.m[3][2] = -(zFar * zNear) / (zFar - zNear);
             return res;
+        }
+    };
+
+    // --- ÚJ: FRUSTUM CULLING MATEMATIKA ---
+    struct Plane {
+        float x, y, z, d;
+        void normalize() {
+            float mag = std::sqrt(x*x + y*y + z*z);
+            x /= mag; y /= mag; z /= mag; d /= mag;
+        }
+    };
+
+    struct Frustum {
+        Plane planes[6];
+
+        static Frustum extract(const Mat4& vp) {
+            Frustum f;
+            f.planes[0] = {vp.m[0][3] + vp.m[0][0], vp.m[1][3] + vp.m[1][0], vp.m[2][3] + vp.m[2][0], vp.m[3][3] + vp.m[3][0]}; // Bal
+            f.planes[1] = {vp.m[0][3] - vp.m[0][0], vp.m[1][3] - vp.m[1][0], vp.m[2][3] - vp.m[2][0], vp.m[3][3] - vp.m[3][0]}; // Jobb
+            f.planes[2] = {vp.m[0][3] + vp.m[0][1], vp.m[1][3] + vp.m[1][1], vp.m[2][3] + vp.m[2][1], vp.m[3][3] + vp.m[3][1]}; // Alsó
+            f.planes[3] = {vp.m[0][3] - vp.m[0][1], vp.m[1][3] - vp.m[1][1], vp.m[2][3] - vp.m[2][1], vp.m[3][3] - vp.m[3][1]}; // Felső
+            f.planes[4] = {vp.m[0][2], vp.m[1][2], vp.m[2][2], vp.m[3][2]}; // Közeli (Near)
+            f.planes[5] = {vp.m[0][3] - vp.m[0][2], vp.m[1][3] - vp.m[1][2], vp.m[2][3] - vp.m[2][2], vp.m[3][3] - vp.m[3][2]}; // Távoli (Far)
+
+            for(int i=0; i<6; ++i) f.planes[i].normalize();
+            return f;
+        }
+
+        bool isBoxVisible(float minX, float minY, float minZ, float maxX, float maxY, float maxZ) const {
+            for(int i = 0; i < 6; ++i) {
+                float px = (planes[i].x > 0) ? maxX : minX;
+                float py = (planes[i].y > 0) ? maxY : minY;
+                float pz = (planes[i].z > 0) ? maxZ : minZ;
+                if (planes[i].x * px + planes[i].y * py + planes[i].z * pz + planes[i].d < 0) {
+                    return false; // A doboz KÍVÜL esik ezen a síkon! Láthatatlan.
+                }
+            }
+            return true; // Ha egyetlen sík se vágta le, akkor látható!
         }
     };
 }

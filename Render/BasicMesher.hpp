@@ -1,11 +1,14 @@
+//
+// Fájl: Render/BasicMesher.hpp
+// Készítette: NexusForge Engine (Rick & Gem)
+// Architektúra: Perfect 3D Greedy Meshing
+//
 #pragma once
 
 #include <vulkan/vulkan.h>
 #include <array>
 #include <vector>
 #include <cstdint>
-#include <fstream>
-#include <string>
 #include "../Core/MacroChunk.hpp"
 
 namespace NF::Render {
@@ -39,66 +42,140 @@ namespace NF::Render {
 
     class BasicMesher {
     private:
-        static inline int GetIndex(int x, int y, int z) { return x + (y * 16) + (z * 256); }
-        static inline bool IsTransparent(const uint8_t* voxels, int x, int y, int z) {
-            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return true;
-            return voxels[GetIndex(x, y, z)] == 0;
+        static inline uint8_t GetVoxelSafe(const uint8_t* voxels, int x, int y, int z) {
+            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return 0;
+            return voxels[x + (y * 16) + (z * 256)];
         }
 
-        // JAVÍTVA: A paletteID típusa uint8_t-ről uint32_t-re cserélve (Globális ID), hogy a Vertex struktúrának és a Shadernek is megfeleljen
-        static void AddFace(MeshData& mesh, int x, int y, int z, int faceDir, uint32_t globalPaletteID, int offsetX, int offsetY, int offsetZ) {
+        // Tökéletesített Vektor-alapú Quad Generátor
+        static void EmitQuad(MeshData& mesh, int* quad_x, int d, int u, int v,
+                             int width, int height, bool isBackFace, uint32_t id,
+                             int ox, int oy, int oz)
+        {
+            // Globális eltolás beállítása
+            float gx = quad_x[0] + (ox * 16.0f);
+            float gy = quad_x[1] + (oy * 16.0f);
+            float gz = quad_x[2] + (oz * 16.0f);
+
+            // Irányvektorok a szélességhez (u) és magassághoz (v)
+            float du[3] = {0.0f, 0.0f, 0.0f};
+            du[u] = static_cast<float>(width);
+
+            float dv[3] = {0.0f, 0.0f, 0.0f};
+            dv[v] = static_cast<float>(height);
+
+            // Normálvektor kiszámítása a d (axis) alapján
+            float nx = 0, ny = 0, nz = 0;
+            if (d == 0) nx = isBackFace ? -1.0f : 1.0f;
+            if (d == 1) ny = isBackFace ? -1.0f : 1.0f;
+            if (d == 2) nz = isBackFace ? -1.0f : 1.0f;
+
             uint32_t v_idx = static_cast<uint32_t>(mesh.vertices.size());
 
-            float nx = 0, ny = 0, nz = 0; float v[4][3];
+            // A Quad 4 sarka vektormatekkal (Garantáltan nem torzul el!)
+            mesh.vertices.push_back({ gx, gy, gz, nx, ny, nz, id });
+            mesh.vertices.push_back({ gx + du[0], gy + du[1], gz + du[2], nx, ny, nz, id });
+            mesh.vertices.push_back({ gx + du[0] + dv[0], gy + du[1] + dv[1], gz + du[2] + dv[2], nx, ny, nz, id });
+            mesh.vertices.push_back({ gx + dv[0], gy + dv[1], gz + dv[2], nx, ny, nz, id });
 
-            switch(faceDir) {
-                case 0: ny = 1.0f; v[0][0]=0;v[0][1]=1;v[0][2]=1; v[1][0]=1;v[1][1]=1;v[1][2]=1; v[2][0]=1;v[2][1]=1;v[2][2]=0; v[3][0]=0;v[3][1]=1;v[3][2]=0; break;
-                case 1: ny = -1.0f; v[0][0]=0;v[0][1]=0;v[0][2]=0; v[1][0]=1;v[1][1]=0;v[1][2]=0; v[2][0]=1;v[2][1]=0;v[2][2]=1; v[3][0]=0;v[3][1]=0;v[3][2]=1; break;
-                case 2: nx = 1.0f; v[0][0]=1;v[0][1]=0;v[0][2]=0; v[1][0]=1;v[1][1]=1;v[1][2]=0; v[2][0]=1;v[2][1]=1;v[2][2]=1; v[3][0]=1;v[3][1]=0;v[3][2]=1; break;
-                case 3: nx = -1.0f; v[0][0]=0;v[0][1]=0;v[0][2]=1; v[1][0]=0;v[1][1]=1;v[1][2]=1; v[2][0]=0;v[2][1]=1;v[2][2]=0; v[3][0]=0;v[3][1]=0;v[3][2]=0; break;
-                case 4: nz = 1.0f; v[0][0]=1;v[0][1]=0;v[0][2]=1; v[1][0]=1;v[1][1]=1;v[1][2]=1; v[2][0]=0;v[2][1]=1;v[2][2]=1; v[3][0]=0;v[3][1]=0;v[3][2]=1; break;
-                case 5: nz = -1.0f; v[0][0]=0;v[0][1]=0;v[0][2]=0; v[1][0]=0;v[1][1]=1;v[1][2]=0; v[2][0]=1;v[2][1]=1;v[2][2]=0; v[3][0]=1;v[3][1]=0;v[3][2]=0; break;
+            // Vulkan CCW (Counter-Clockwise) Winding Order
+            if (!isBackFace) {
+                mesh.indices.insert(mesh.indices.end(), {v_idx, v_idx+1, v_idx+2, v_idx+2, v_idx+3, v_idx});
+            } else {
+                mesh.indices.insert(mesh.indices.end(), {v_idx, v_idx+3, v_idx+2, v_idx+2, v_idx+1, v_idx});
             }
-
-            // Kiszámoljuk a Globális pozíciót
-            float gx = (float)x + (offsetX * 16.0f);
-            float gy = (float)y + (offsetY * 16.0f);
-            float gz = (float)z + (offsetZ * 16.0f);
-
-            for(int i = 0; i < 4; ++i) {
-                mesh.vertices.push_back({ gx + v[i][0], gy + v[i][1], gz + v[i][2], nx, ny, nz, globalPaletteID });
-            }
-
-            mesh.indices.push_back(v_idx + 0); mesh.indices.push_back(v_idx + 1); mesh.indices.push_back(v_idx + 2);
-            mesh.indices.push_back(v_idx + 2); mesh.indices.push_back(v_idx + 3); mesh.indices.push_back(v_idx + 0);
         }
 
     public:
-        // Fogadja a Chunk eltolását!
         static MeshData GenerateMesh(NF::Core::MacroChunk_Small& chunk, int offsetX = 0, int offsetY = 0, int offsetZ = 0) {
             MeshData mesh;
-            mesh.vertices.reserve(4096);
-            mesh.indices.reserve(6144);
+            mesh.vertices.reserve(1024);
+            mesh.indices.reserve(1536);
             const uint8_t* voxels = chunk.tickAfter;
 
-            for (int z = 0; z < 16; ++z) {
-                for (int y = 0; y < 16; ++y) {
-                    for (int x = 0; x < 16; ++x) {
-                        uint8_t localVoxelID = voxels[GetIndex(x, y, z)];
-                        if (localVoxelID == 0) continue;
+            // d = 0 (X tengely), d = 1 (Y tengely), d = 2 (Z tengely)
+            for (int d = 0; d < 3; ++d) {
+                // Vektormatek: XxY=Z, YxZ=X, ZxX=Y (Garantálja a jó cullingot)
+                int u = (d == 0) ? 1 : (d == 1) ? 2 : 0;
+                int v = (d == 0) ? 2 : (d == 1) ? 0 : 1;
 
-                        // JAVÍTÁS: A voxels[] a chunk LOKÁLIS paletta indexét tartalmazza.
-                        // A Shadernek viszont a GLOBÁLIS BlockStateID-ra van szüksége a helyes színezéshez.
-                        // Ezért kikeressük a globális ID-t a chunk palettájából a lokális azonosító alapján!
-                        uint32_t globalID = chunk.PaletteGlobalBlockStateIDs[localVoxelID];
+                int x[3] = {0, 0, 0};
+                int q[3] = {0, 0, 0};
+                q[d] = 1;
 
-                        if (IsTransparent(voxels, x, y + 1, z)) AddFace(mesh, x, y, z, 0, globalID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y - 1, z)) AddFace(mesh, x, y, z, 1, globalID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x + 1, y, z)) AddFace(mesh, x, y, z, 2, globalID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x - 1, y, z)) AddFace(mesh, x, y, z, 3, globalID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y, z + 1)) AddFace(mesh, x, y, z, 4, globalID, offsetX, offsetY, offsetZ);
-                        if (IsTransparent(voxels, x, y, z - 1)) AddFace(mesh, x, y, z, 5, globalID, offsetX, offsetY, offsetZ);
+                // -1-től megyünk, hogy a levegő/chunk határ látszódjon
+                for (x[d] = -1; x[d] < 16; ++x[d]) {
+                    uint32_t maskPos[256] = {0};
+                    uint32_t maskNeg[256] = {0};
+
+                    for (x[v] = 0; x[v] < 16; ++x[v]) {
+                        for (x[u] = 0; x[u] < 16; ++x[u]) {
+
+                            // A C++ tömb-varázslat: az x[0,1,2] automatikusan beáll a jó tengelyre!
+                            uint8_t b1 = (x[d] >= 0) ? GetVoxelSafe(voxels, x[0], x[1], x[2]) : 0;
+                            uint8_t b2 = (x[d] < 15) ? GetVoxelSafe(voxels, x[0]+q[0], x[1]+q[1], x[2]+q[2]) : 0;
+
+                            bool solid1 = (b1 != 0);
+                            bool solid2 = (b2 != 0);
+
+                            if (solid1 && !solid2) {
+                                maskPos[x[u] + x[v] * 16] = chunk.PaletteGlobalBlockStateIDs[b1];
+                            } else if (!solid1 && solid2) {
+                                maskNeg[x[u] + x[v] * 16] = chunk.PaletteGlobalBlockStateIDs[b2];
+                            }
+                        }
                     }
+
+                    // A belső felfaló rutin (A "Mohó" rész)
+                    auto SweepMask = [&](uint32_t* mask, bool isBackFace) {
+                        for (int j = 0; j < 16; ++j) {
+                            for (int i = 0; i < 16; ) {
+                                uint32_t id = mask[i + j * 16];
+                                if (id != 0) {
+
+                                    // 1. Horizontális szélesség
+                                    int width = 1;
+                                    while (i + width < 16 && mask[(i + width) + j * 16] == id) {
+                                        width++;
+                                    }
+
+                                    // 2. Vertikális magasság
+                                    int height = 1;
+                                    bool done = false;
+                                    while (j + height < 16) {
+                                        for (int k = 0; k < width; ++k) {
+                                            if (mask[(i + k) + (j + height) * 16] != id) {
+                                                done = true; break;
+                                            }
+                                        }
+                                        if (done) break;
+                                        height++;
+                                    }
+
+                                    // A Quad pontos helyének kiszámítása a térben
+                                    int quad_x[3] = {0, 0, 0};
+                                    quad_x[d] = x[d] + 1; // A lap mindig a határra esik!
+                                    quad_x[u] = i;
+                                    quad_x[v] = j;
+
+                                    EmitQuad(mesh, quad_x, d, u, v, width, height, isBackFace, id, offsetX, offsetY, offsetZ);
+
+                                    // 3. Maszk tisztítása
+                                    for (int l = 0; l < height; ++l) {
+                                        for (int k = 0; k < width; ++k) {
+                                            mask[(i + k) + (j + l) * 16] = 0;
+                                        }
+                                    }
+                                    i += width;
+                                } else {
+                                    i++;
+                                }
+                            }
+                        }
+                    };
+
+                    SweepMask(maskPos, false);
+                    SweepMask(maskNeg, true);
                 }
             }
             return mesh;

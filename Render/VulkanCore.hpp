@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <sstream>
+#include <unordered_map>
 
 #include "VulkanCommandManager.hpp"
 #include "VulkanRenderer.hpp"
@@ -25,22 +26,22 @@
 #include "VulkanBuffer.hpp"
 #include "BasicMesher.hpp"
 #include "CameraMath.hpp"
-#include "VulkanMegaArena.hpp" // ÚJ BEILLESZTÉS
+#include "VulkanMegaArena.hpp"
 #include "../Core/Physics.hpp"
+#include "../Core/World.hpp"
 
 extern void BreakBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz);
 extern void PlaceBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz, uint8_t blockID);
-extern std::vector<NF::Core::MacroChunk_Small> realWorld;
 
 namespace NF::Render {
 
-    // Emlékszik arra, hogy a Chunk hol él a Mega-Bufferben!
     struct ChunkRenderState {
-        uint32_t cmdIndex = 0xFFFFFFFF; // Ha max uint, még nincs lefoglalva
+        uint32_t cmdIndex = 0xFFFFFFFF;
         uint32_t vOffset = 0;
         uint32_t iOffset = 0;
-        uint32_t maxV = 0; // Túltervezett méret, hogy ne kelljen mindig újra allokálni
+        uint32_t maxV = 0;
         uint32_t maxI = 0;
+        bool isEmpty = true;
     };
 
     class VulkanCore {
@@ -78,15 +79,21 @@ namespace NF::Render {
         const uint32_t WIDTH = 1280;
         const uint32_t HEIGHT = 720;
 
-        // --- ÚJ: MDI MEGA ARENA ÉS CHUNK ÁLLAPOTOK ---
         VulkanMegaArena megaArena;
-        std::vector<ChunkRenderState> chunkRenderStates;
+
+        // VÉGTELEN TÉRKÉP ÁLLAPOTAI
+        std::unordered_map<uint64_t, ChunkRenderState> chunkRenderStates;
+
+        int currentlyDrawnChunks = 0;
+        int renderDistance = 8; // Kezdő látótávolság (8 chunk sugár)
 
         double lastX = WIDTH / 2.0;
         double lastY = HEIGHT / 2.0;
         float yaw = -90.0f;
         float pitch = 0.0f;
-        Vec3 cameraPos = {64.0f, 60.0f, 64.0f};
+
+        // Spawn középen
+        Vec3 cameraPos = {256.0f, 80.0f, 256.0f};
         Vec3 cameraFront = {0.0f, 0.0f, -1.0f};
         Vec3 cameraUp = {0.0f, 1.0f, 0.0f};
         bool firstMouse = true;
@@ -94,7 +101,7 @@ namespace NF::Render {
         float lastFrame = 0.0f;
 
         NF::Core::Physics::Entity player = {
-            {64.0f, 60.0f, 64.0f}, {0.0f, 0.0f, 0.0f}, {0.6f, 1.8f, 0.6f}, false, false, 0.0f
+            {256.0f, 80.0f, 256.0f}, {0.0f, 0.0f, 0.0f}, {0.6f, 1.8f, 0.6f}, false, false, 0.0f
         };
 
         int playerHP = 100;
@@ -117,7 +124,7 @@ namespace NF::Render {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
             glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-            window = glfwCreateWindow(WIDTH, HEIGHT, "NexusForge - MDI GPU-Driven Render", nullptr, nullptr);
+            window = glfwCreateWindow(WIDTH, HEIGHT, "NexusForge - Infinite World Streaming", nullptr, nullptr);
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         }
 
@@ -128,8 +135,11 @@ namespace NF::Render {
             createInfo.enabledExtensionCount = count; createInfo.ppEnabledExtensionNames = exts;
             if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) throw std::runtime_error("Instance hiba!");
         }
+
         void createSurface() { if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) throw std::runtime_error("Surface hiba!"); }
+
         void pickPhysicalDevice() { uint32_t count = 0; vkEnumeratePhysicalDevices(instance, &count, nullptr); std::vector<VkPhysicalDevice> devices(count); vkEnumeratePhysicalDevices(instance, &count, devices.data()); physicalDevice = devices[0]; }
+
         void createLogicalDevice() {
             float prio = 1.0f; VkDeviceQueueCreateInfo qInfo{}; qInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; qInfo.queueFamilyIndex = 0; qInfo.queueCount = 1; qInfo.pQueuePriorities = &prio;
             VkDeviceCreateInfo dInfo{}; dInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; dInfo.pQueueCreateInfos = &qInfo; dInfo.queueCreateInfoCount = 1;
@@ -137,6 +147,7 @@ namespace NF::Render {
             if (vkCreateDevice(physicalDevice, &dInfo, nullptr, &device) != VK_SUCCESS) throw std::runtime_error("Device hiba!");
             vkGetDeviceQueue(device, 0, 0, &graphicsQueue);
         }
+
         void createSwapChain() {
             VkSwapchainCreateInfoKHR createInfo{};
             createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -147,14 +158,12 @@ namespace NF::Render {
             createInfo.imageArrayLayers = 1;
             createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-            // --- JAVÍTVA: VSYNC KIKAPCSOLÁSA (UNLOCKED FPS) ---
-            // A VK_PRESENT_MODE_IMMEDIATE_KHR azonnal kilöki a képet (Tearing lehet, de max FPS-t ad)
-            createInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            createInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // VSYNC KIKAPCSOLVA
 
             if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) throw std::runtime_error("Swapchain hiba!");
             uint32_t imageCount; vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr); swapChainImages.resize(imageCount); vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
         }
+
         void createImageViews() {
             swapChainImageViews.resize(swapChainImages.size());
             for (size_t i = 0; i < swapChainImages.size(); i++) {
@@ -162,7 +171,9 @@ namespace NF::Render {
                 vkCreateImageView(device, &viewInfo, nullptr, &swapChainImageViews[i]);
             }
         }
+
         void createRenderPass() { renderPass = NF::Render::VulkanPipeline::CreateRenderPass(device, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_D32_SFLOAT); }
+
         void createDepthResources() {
             VkFormat depthFormat = VK_FORMAT_D32_SFLOAT; VkImageCreateInfo imageInfo{}; imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; imageInfo.imageType = VK_IMAGE_TYPE_2D; imageInfo.extent.width = swapChainExtent.width; imageInfo.extent.height = swapChainExtent.height; imageInfo.extent.depth = 1; imageInfo.mipLevels = 1; imageInfo.arrayLayers = 1; imageInfo.format = depthFormat; imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL; imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT; imageInfo.samples = VK_SAMPLE_COUNT_1_BIT; imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             vkCreateImage(device, &imageInfo, nullptr, &depthImage);
@@ -172,6 +183,7 @@ namespace NF::Render {
             VkImageViewCreateInfo viewInfo{}; viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; viewInfo.image = depthImage; viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; viewInfo.format = depthFormat; viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; viewInfo.subresourceRange.baseMipLevel = 0; viewInfo.subresourceRange.levelCount = 1; viewInfo.subresourceRange.baseArrayLayer = 0; viewInfo.subresourceRange.layerCount = 1;
             vkCreateImageView(device, &viewInfo, nullptr, &depthImageView);
         }
+
         void createFramebuffers() {
             swapChainFramebuffers.resize(swapChainImageViews.size());
             for (size_t i = 0; i < swapChainImageViews.size(); i++) {
@@ -180,12 +192,14 @@ namespace NF::Render {
                 vkCreateFramebuffer(device, &fbInfo, nullptr, &swapChainFramebuffers[i]);
             }
         }
+
         void createGraphicsPipeline() {
             auto vertCode = NF::Render::VulkanRenderer::ReadFile("vert.spv"); auto fragCode = NF::Render::VulkanRenderer::ReadFile("frag.spv");
             VkShaderModule vertShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, vertCode); VkShaderModule fragShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, fragCode);
             graphicsPipeline = NF::Render::VulkanRenderer::CreateGraphicsPipeline(device, swapChainExtent, renderPass, pipelineLayout, vertShaderModule, fragShaderModule);
             vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
         }
+
         void createCommandPool() { commandPool = NF::Render::CommandManager::CreateCommandPool(device, 0); }
         void createCommandBuffers() { commandBuffer = NF::Render::CommandManager::CreateCommandBuffer(device, commandPool); }
         void createSyncObjects() {
@@ -213,71 +227,82 @@ namespace NF::Render {
             createInstance(); createSurface(); pickPhysicalDevice(); createLogicalDevice(); createSwapChain(); createImageViews();
             createRenderPass(); createDepthResources(); createFramebuffers(); createGraphicsPipeline(); createCommandPool(); createCommandBuffers(); createSyncObjects();
 
-            // MDI Mega Arena Inicializálás!
             megaArena.Initialize(device, physicalDevice);
-            chunkRenderStates.resize(200); // 200 a realWorld maximális mérete
 
-            RebuildAll(); // Kezdeti 128 chunk legenerálása
+            // JAVÍTVA: Nincs többé RebuildAll() sem resize(4096). A világ üresen indul,
+            // és a ManageInfiniteChunks() fogja felépíteni magától futásidőben!
 
             initImGui();
-            std::cout << "[Vulkan] Motor inicializalva! MDI aktív." << std::endl;
+            std::cout << "[Vulkan] Motor inicializalva! Infinite MDI Streaming aktiv." << std::endl;
         }
 
     public:
-        // --- 1. CSAK EGYETLEN CHUNK ÚJRAMESHELÉSE (MDI MÁGIA) ---
-        void UpdateSingleChunk(uint32_t chunkIndex, int cx, int cy, int cz) {
-            vkDeviceWaitIdle(device); // Biztonsági stop (később Fencere cseréljük)
+        void UpdateSingleChunk(uint64_t hash, int cx, int cy, int cz) {
+            vkDeviceWaitIdle(device);
 
-            auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(realWorld[chunkIndex], cx, cy, cz);
-            auto& state = chunkRenderStates[chunkIndex];
+            auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(*NF::Core::realWorld[hash], cx, cy, cz);
+            auto& state = chunkRenderStates[hash];
 
-            // Ha a chunk üres lett (kiütöttük az utolsó blokkot is)
             if (chunkMesh.vertices.empty()) {
-                if (state.cmdIndex != 0xFFFFFFFF) {
-                    megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 0; // GPU ignorálja!
-                }
+                state.isEmpty = true;
+                if (state.cmdIndex != 0xFFFFFFFF) megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 0;
                 return;
             }
+            state.isEmpty = false;
 
-            // Ha még sosem volt lefoglalva, VAGY nagyobb hely kell neki, mint a régi: ÚJ ALLOKÁCIÓ
-            bool needsNewAlloc = (state.cmdIndex == 0xFFFFFFFF) ||
-                                 (chunkMesh.vertices.size() > state.maxV) ||
-                                 (chunkMesh.indices.size() > state.maxI);
+            bool needsNewAlloc = (state.cmdIndex == 0xFFFFFFFF) || (chunkMesh.vertices.size() > state.maxV) || (chunkMesh.indices.size() > state.maxI);
 
             if (needsNewAlloc) {
-                if (state.cmdIndex != 0xFFFFFFFF) {
-                    megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 0; // Régi parancs inaktiválása
-                }
-                // Túltervezés: Kérjünk +50% helyet, hogy ne kelljen folyton újra allokálni ha épít!
+                if (state.cmdIndex != 0xFFFFFFFF) megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 0;
                 uint32_t vCount = static_cast<uint32_t>(chunkMesh.vertices.size() * 1.5f);
                 uint32_t iCount = static_cast<uint32_t>(chunkMesh.indices.size() * 1.5f);
-
                 megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset);
-                state.maxV = vCount;
-                state.maxI = iCount;
+                state.maxV = vCount; state.maxI = iCount;
             }
 
-            // 1. Nyers adat bemásolása a gigantikus VRAM tömbbe a kapott Offsetre
             memcpy(megaArena.mappedVertexData + state.vOffset, chunkMesh.vertices.data(), chunkMesh.vertices.size() * sizeof(Vertex));
             memcpy(megaArena.mappedIndexData + state.iOffset, chunkMesh.indices.data(), chunkMesh.indices.size() * sizeof(uint32_t));
 
-            // 2. Parancs frissítése a GPU-nak!
             VkDrawIndexedIndirectCommand& cmd = megaArena.mappedIndirectData[state.cmdIndex];
             cmd.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
-            cmd.instanceCount = 1; // 1 = Rajzold ki!
+            cmd.instanceCount = 1;
             cmd.firstIndex = state.iOffset;
             cmd.vertexOffset = state.vOffset;
             cmd.firstInstance = 0;
         }
 
-        // --- 2. AZ EGÉSZ VILÁG GENERÁLÁSA (CSAK INDÍTÁSKOR) ---
-        void RebuildAll() {
-            std::cout << "[Mesher] 128 Chunk epitese es MDI bejegyzes..." << std::endl;
-            for (int cx = 0; cx < 8; ++cx) {
-                for (int cz = 0; cz < 8; ++cz) {
-                    for (int cy = 0; cy < 2; ++cy) {
-                        uint32_t chunkIndex = cx + (cz * 8) + (cy * 64);
-                        UpdateSingleChunk(chunkIndex, cx, cy, cz);
+        // LUSTA BETÖLTŐ (Lazy Loader) A VÉGTELEN TÉRKÉPHEZ
+        void ManageInfiniteChunks() {
+            int pcx = static_cast<int>(std::floor(cameraPos.x)) >> 4;
+            int pcy = static_cast<int>(std::floor(cameraPos.y)) >> 4;
+            int pcz = static_cast<int>(std::floor(cameraPos.z)) >> 4;
+
+            int chunksProcessedThisFrame = 0;
+
+            for (int r = 0; r <= renderDistance; ++r) {
+                for (int x = -r; x <= r; ++x) {
+                    for (int z = -r; z <= r; ++z) {
+                        if (x*x + z*z > r*r) continue; // Kör alakú betöltés
+
+                        for (int cy = 0; cy < 4; ++cy) { // Y=0..63 mélység/magasság
+                            int cx = pcx + x;
+                            int cz = pcz + z;
+                            uint64_t hash = NF::Core::GetChunkHash(cx, cy, cz);
+
+                            if (NF::Core::realWorld.find(hash) == NF::Core::realWorld.end()) {
+                                auto newChunk = std::make_unique<NF::Core::MacroChunk_Small>();
+                                NF::Core::GenerateTerrain(*newChunk, cx, cy, cz);
+                                NF::Core::realWorld[hash] = std::move(newChunk);
+                            }
+
+                            if (chunkRenderStates.find(hash) == chunkRenderStates.end()) {
+                                UpdateSingleChunk(hash, cx, cy, cz);
+                                chunksProcessedThisFrame++;
+
+                                // Sebességkorlát: Csak 2 chunkot küldünk a VRAM-ba frame-enként, hogy az FPS ne essen le
+                                if (chunksProcessedThisFrame >= 2) return;
+                            }
+                        }
                     }
                 }
             }
@@ -330,9 +355,7 @@ namespace NF::Render {
             float currentTime = glfwGetTime();
 
             if (spaceIsPressed && !spaceWasPressed) {
-                if (currentTime - lastSpacePressTime < 0.3f) {
-                    player.isFlying = !player.isFlying;
-                }
+                if (currentTime - lastSpacePressTime < 0.3f) player.isFlying = !player.isFlying;
                 lastSpacePressTime = currentTime;
             }
             spaceWasPressed = spaceIsPressed;
@@ -354,9 +377,7 @@ namespace NF::Render {
                 if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) player.velocity.y += 50.0f * deltaTime;
                 if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) player.velocity.y -= 50.0f * deltaTime;
             } else {
-                if (spaceIsPressed && player.isGrounded) {
-                    player.velocity.y = 10.0f;
-                }
+                if (spaceIsPressed && player.isGrounded) player.velocity.y = 10.0f;
             }
 
             NF::Core::Physics::UpdateEntityPhysics(player, deltaTime);
@@ -366,7 +387,7 @@ namespace NF::Render {
                 playerHP -= damage;
                 player.pendingFallDamage = 0.0f;
                 if (playerHP <= 0) {
-                    player.position = {64.0f, 60.0f, 64.0f};
+                    player.position = {256.0f, 80.0f, 256.0f};
                     player.velocity = {0.0f, 0.0f, 0.0f};
                     player.isFlying = false;
                     playerHP = maxHP;
@@ -394,13 +415,10 @@ namespace NF::Render {
                             uint8_t selectedBlock = hotbarBlocks[selectedHotbarSlot];
                             if (selectedBlock != 0) {
                                 int px = hit.hitX + hit.normalX; int py = hit.hitY + hit.normalY; int pz = hit.hitZ + hit.normalZ;
-
-                                NF::Render::Vec3 pMin, pMax;
-                                player.GetBounds(player.position, pMin, pMax);
+                                NF::Render::Vec3 pMin, pMax; player.GetBounds(player.position, pMin, pMax);
                                 bool intersectX = (pMin.x < px + 1.0f && pMax.x > px);
                                 bool intersectY = (pMin.y < py + 1.0f && pMax.y > py);
                                 bool intersectZ = (pMin.z < pz + 1.0f && pMax.z > pz);
-
                                 if (!(intersectX && intersectY && intersectZ)) PlaceBlockAndRemesh(px, py, pz, selectedBlock);
                             }
                         }
@@ -411,29 +429,12 @@ namespace NF::Render {
         }
 
         void updateTelemetryState(float dt) {
-            totalFrames++;
-            totalTimeElapsed += dt;
-
-            // Mindig rögzítjük a best/worst értékeket az első 10 frame után (bemelegedés)
-            if (totalFrames > 10) {
-                if (dt < bestFrameTime) bestFrameTime = dt;
-                if (dt > worstFrameTime) worstFrameTime = dt;
-            }
-
-            // Mindig rögzítjük a history-t, FÜGGETLENÜL attól, hogy nyitva van-e a menü!
+            totalFrames++; totalTimeElapsed += dt;
+            if (totalFrames > 10) { if (dt < bestFrameTime) bestFrameTime = dt; if (dt > worstFrameTime) worstFrameTime = dt; }
             float currentTimestamp = totalTimeElapsed;
             frameHistory.push_back({currentTimestamp, dt});
-
-            // Töröljük a 10 másodpercnél régebbi adatokat, hogy ne fogyjon el a RAM
-            while (!frameHistory.empty() && (currentTimestamp - frameHistory.front().first > 10.0f)) {
-                frameHistory.erase(frameHistory.begin());
-            }
-
-            // A menü-specifikus változókat csak akkor növeljük, ha nyitva van
-            if (telemetryMenuOpen) {
-                menuOpenFrames++;
-                menuOpenTimeElapsed += dt;
-            }
+            while (!frameHistory.empty() && (currentTimestamp - frameHistory.front().first > 10.0f)) frameHistory.erase(frameHistory.begin());
+            if (telemetryMenuOpen) { menuOpenFrames++; menuOpenTimeElapsed += dt; }
         }
 
     public:
@@ -449,9 +450,7 @@ namespace NF::Render {
         void cleanup() {
             vkDeviceWaitIdle(device);
             ImGui_ImplVulkan_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext();
-
-            megaArena.Cleanup(); // ÚJ: Mega Arena Törlése
-
+            megaArena.Cleanup();
             vkDestroyDescriptorPool(device, descriptorPool, nullptr);
             vkDestroySemaphore(device, renderFinishedSemaphore, nullptr); vkDestroySemaphore(device, imageAvailableSemaphore, nullptr); vkDestroyFence(device, inFlightFence, nullptr);
             vkDestroyImageView(device, depthImageView, nullptr); vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthImageMemory, nullptr);
@@ -461,6 +460,8 @@ namespace NF::Render {
         }
 
         void drawFrame() {
+            ManageInfiniteChunks(); // <--- EZ TÖLTI BE A VILÁGOT MENET KÖZBEN!
+
             vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
             vkResetFences(device, 1, &inFlightFence);
 
@@ -498,15 +499,26 @@ namespace NF::Render {
                 int64_t gcx = static_cast<int64_t>(std::floor(cameraPos.x / 16.0f)); int64_t gcy = static_cast<int64_t>(std::floor(cameraPos.y / 16.0f)); int64_t gcz = static_cast<int64_t>(std::floor(cameraPos.z / 16.0f));
                 ImGui::SetNextWindowBgAlpha(0.85f);
                 ImGui::Begin("NexusForge Telemetry", &telemetryMenuOpen, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "PERFORMANCE"); ImGui::Separator();
                 ImGui::Text("FPS: %d", static_cast<int>(1.0f / (deltaTime > 0.0f ? deltaTime : 0.001f)));
                 ImGui::Text("FrameTime (Current): %.2f ms", deltaTime * 1000.0f);
-                // IDE JÖNNEK VISSZA A HIÁNYZÓ ADATOK:
                 ImGui::Text("FrameTime (1s Avg): %.2f ms", avg1s * 1000.0f);
                 ImGui::Text("FrameTime (10s Avg): %.2f ms", avg10s * 1000.0f);
                 ImGui::Text("Best Frame: %.2f ms", (bestFrameTime == 999999.0f ? 0.0f : bestFrameTime * 1000.0f));
                 ImGui::Text("Worst Frame: %.2f ms", worstFrameTime * 1000.0f);
-                ImGui::Text("Draw Commands: %d", megaArena.currentCommandCount.load());
+
+                ImGui::Text("Chunks Drawn: %d / %d", currentlyDrawnChunks, (int)chunkRenderStates.size());
+
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "ENGINE CONTROLS"); ImGui::Separator();
+                // A CSÚSZKA, AMIVEL REPÜLÉS KÖZBEN IS NÖVELHETED A LÁTÓTÁVOT (Akár 64-ig!)
+                ImGui::SliderInt("Render Distance", &renderDistance, 2, 64, "%d Chunks");
+
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "WORLD METRICS"); ImGui::Separator();
+                ImGui::Text("Global: X: %lld, Y: %lld, Z: %lld", gcx, gcy, gcz);
+                ImGui::Text("Fly Mode: %s", player.isFlying ? "ON" : "OFF");
                 ImGui::End();
             }
 
@@ -530,6 +542,37 @@ namespace NF::Render {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
             // =================================================================
+            // FRUSTUM CULLING (C++ Hash Map Iteráció)
+            // =================================================================
+            Mat4 view = Mat4::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
+            Mat4 proj = Mat4::perspective(45.0f * (M_PI / 180.0f), (float)WIDTH / (float)HEIGHT, 0.1f, 1000.0f);
+            Mat4 vp = proj * view;
+
+            Frustum f = Frustum::extract(vp);
+            currentlyDrawnChunks = 0;
+
+            for (auto& [hash, state] : chunkRenderStates) {
+                if (state.cmdIndex != 0xFFFFFFFF && !state.isEmpty) {
+
+                    // Visszafejtjük a 3D koordinátát a 64-bites Hash-ből!
+                    int cx = (hash >> 42) & 0x3FFFFF;
+                    int cy = (hash >> 22) & 0xFFFFF;
+                    int cz = hash & 0x3FFFFF;
+
+                    // Előjel kiterjesztése a negatív koordinátákhoz
+                    if (cx & 0x200000) cx |= ~0x3FFFFF;
+                    if (cz & 0x200000) cz |= ~0x3FFFFF;
+
+                    if (f.isBoxVisible(cx*16.0f, cy*16.0f, cz*16.0f, cx*16.0f+16.0f, cy*16.0f+16.0f, cz*16.0f+16.0f)) {
+                        megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 1;
+                        currentlyDrawnChunks++;
+                    } else {
+                        megaArena.mappedIndirectData[state.cmdIndex].instanceCount = 0;
+                    }
+                }
+            }
+
+            // =================================================================
             // AZ EGYETLEN EGY RAJZOLÓ PARANCS (MDI MÁGIA)
             // =================================================================
             uint32_t activeCommands = megaArena.currentCommandCount.load(std::memory_order_relaxed);
@@ -539,12 +582,8 @@ namespace NF::Render {
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(commandBuffer, megaArena.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                Mat4 view = Mat4::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-                Mat4 proj = Mat4::perspective(45.0f * (M_PI / 180.0f), (float)WIDTH / (float)HEIGHT, 0.1f, 1000.0f);
-                Mat4 mvp = proj * view;
-                vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &mvp);
+                vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &vp);
 
-                // A GPU végigolvassa az Indirect Buffert és mindent megrajzol, CPU beavatkozás NÉLKÜL!
                 vkCmdDrawIndexedIndirect(commandBuffer, megaArena.indirectBuffer, 0, activeCommands, sizeof(VkDrawIndexedIndirectCommand));
             }
 
