@@ -45,22 +45,31 @@ extern void PlaceBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz, uint8_t bloc
 
 namespace NF::Render {
 
-    // ÚJ: SZOROSAN PAKOLT ADATSTRUKTÚRA A CULLINGHOZ (O(1) CACHE BARÁT)
     struct CullData {
+        uint64_t hash;
         float minX, minY, minZ;
         float maxX, maxY, maxZ;
         uint32_t cmdIndex;
-        bool isActive;
     };
 
     struct ChunkRenderState {
         uint32_t cmdIndex = 0xFFFFFFFF;
-        uint32_t cullIndex = 0xFFFFFFFF; // Új: index a cullArray-ben
+        uint32_t cullIndex = 0xFFFFFFFF;
+        uint32_t activeHashIndex = 0xFFFFFFFF;
         uint32_t vOffset = 0;
         uint32_t iOffset = 0;
         uint32_t maxV = 0;
         uint32_t maxI = 0;
         bool isEmpty = true;
+    };
+
+    enum class TaskType { UPLOAD, UNLOAD };
+    struct ChunkTask {
+        TaskType type;
+        uint64_t hash;
+        int cx, cy, cz;
+        std::unique_ptr<NF::Core::MacroChunk_Small> newChunk;
+        NF::Render::MeshData meshData;
     };
 
     class VulkanCore {
@@ -100,25 +109,21 @@ namespace NF::Render {
 
         VulkanMegaArena megaArena;
         std::unordered_map<uint64_t, ChunkRenderState> chunkRenderStates;
-
-        // ÚJ: A Culling vektor, amin a CPU ezerszer gyorsabban megy végig
         std::vector<CullData> cullArray;
 
-        struct ChunkUploadTask {
-            uint64_t hash;
-            int cx, cy, cz;
-            std::unique_ptr<NF::Core::MacroChunk_Small> newChunk;
-            NF::Render::MeshData meshData;
-        };
+        // ÚJ: A VRAM SZEMÉTSZEDŐ LISTÁJA
+        std::vector<ChunkRenderState> freeVramSlots;
 
         std::mutex uploadMutex;
-        std::vector<ChunkUploadTask> uploadQueue;
+        std::vector<ChunkTask> uploadQueue;
 
         std::mutex requestMutex;
         std::unordered_set<uint64_t> requestedChunks;
 
         std::atomic<bool> workerRunning{true};
         std::thread workerThread;
+
+        std::vector<uint64_t> activeChunkHashes;
 
         int currentlyDrawnChunks = 0;
         int renderDistance = 8;
@@ -159,7 +164,7 @@ namespace NF::Render {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
             glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-            window = glfwCreateWindow(WIDTH, HEIGHT, "NexusForge - DOD Shadow Buffering", nullptr, nullptr);
+            window = glfwCreateWindow(WIDTH, HEIGHT, "NexusForge - Infinite World Streaming", nullptr, nullptr);
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         }
 
@@ -262,11 +267,11 @@ namespace NF::Render {
             createRenderPass(); createDepthResources(); createFramebuffers(); createGraphicsPipeline(); createCommandPool(); createCommandBuffers(); createSyncObjects();
 
             megaArena.Initialize(device, physicalDevice);
-            cullArray.reserve(300000); // Lefoglaljuk előre a helyet, hogy ne akadjon az allokáció
+            cullArray.reserve(300000);
             initImGui();
 
             workerThread = std::thread(&VulkanCore::AsyncChunkWorker, this);
-            std::cout << "[Vulkan] Motor inicializalva! O(1) DOD Culling aktiv." << std::endl;
+            std::cout << "[Vulkan] Motor inicializalva! Infinite Chunk Streaming aktiv." << std::endl;
         }
 
     public:
@@ -280,8 +285,18 @@ namespace NF::Render {
             if (chunkMesh.vertices.empty()) {
                 state.isEmpty = true;
                 if (!isNew) {
-                    megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
-                    if (state.cullIndex != 0xFFFFFFFF) cullArray[state.cullIndex].isActive = false;
+                    if (state.cmdIndex != 0xFFFFFFFF) {
+                        megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
+                        freeVramSlots.push_back(state); // Bedobjuk a közösbe!
+                        state.cmdIndex = 0xFFFFFFFF;
+                    }
+                    if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) {
+                        uint32_t cIdx = state.cullIndex;
+                        cullArray[cIdx] = cullArray.back();
+                        chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx;
+                        cullArray.pop_back();
+                        state.cullIndex = 0xFFFFFFFF;
+                    }
                 }
                 return;
             }
@@ -290,19 +305,39 @@ namespace NF::Render {
             bool needsNewAlloc = isNew || (chunkMesh.vertices.size() > state.maxV) || (chunkMesh.indices.size() > state.maxI);
 
             if (needsNewAlloc) {
-                if (!isNew) megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
-                uint32_t vCount = static_cast<uint32_t>(chunkMesh.vertices.size() * 1.5f);
-                uint32_t iCount = static_cast<uint32_t>(chunkMesh.indices.size() * 1.5f);
+                if (!isNew && state.cmdIndex != 0xFFFFFFFF) {
+                    megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
+                    freeVramSlots.push_back(state);
+                }
 
-                if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) return;
-                state.maxV = vCount; state.maxI = iCount;
+                uint32_t vCount = static_cast<uint32_t>(chunkMesh.vertices.size() * 1.2f);
+                uint32_t iCount = static_cast<uint32_t>(chunkMesh.indices.size() * 1.2f);
+
+                bool foundReuse = false;
+                for (size_t i = 0; i < freeVramSlots.size(); ++i) {
+                    if (freeVramSlots[i].maxV >= vCount && freeVramSlots[i].maxI >= iCount) {
+                        state.cmdIndex = freeVramSlots[i].cmdIndex;
+                        state.vOffset = freeVramSlots[i].vOffset;
+                        state.iOffset = freeVramSlots[i].iOffset;
+                        state.maxV = freeVramSlots[i].maxV;
+                        state.maxI = freeVramSlots[i].maxI;
+
+                        freeVramSlots[i] = freeVramSlots.back();
+                        freeVramSlots.pop_back();
+                        foundReuse = true;
+                        break;
+                    }
+                }
+
+                if (!foundReuse) {
+                    if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) return;
+                    state.maxV = vCount; state.maxI = iCount;
+                }
             }
 
-            // MÁSOLD A VRAM-BA...
             memcpy(megaArena.mappedVertexData + state.vOffset, chunkMesh.vertices.data(), chunkMesh.vertices.size() * sizeof(Vertex));
             memcpy(megaArena.mappedIndexData + state.iOffset, chunkMesh.indices.data(), chunkMesh.indices.size() * sizeof(uint32_t));
 
-            // ... DE AZ INDIRECT COMMANDOT CSAK A RAM-BAN LÉVŐ SHADOW BUFFERBE!
             VkDrawIndexedIndirectCommand& cmd = megaArena.shadowIndirectData[state.cmdIndex];
             cmd.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
             cmd.instanceCount = 1;
@@ -311,19 +346,23 @@ namespace NF::Render {
             cmd.firstInstance = 0;
 
             if (isNew) {
-                CullData cd;
-                cd.minX = cx * 16.0f; cd.minY = cy * 16.0f; cd.minZ = cz * 16.0f;
-                cd.maxX = cd.minX + 16.0f; cd.maxY = cd.minY + 16.0f; cd.maxZ = cd.minZ + 16.0f;
-                cd.cmdIndex = state.cmdIndex;
-                cd.isActive = true;
-
-                state.cullIndex = static_cast<uint32_t>(cullArray.size());
-                cullArray.push_back(cd);
+                state.activeHashIndex = static_cast<uint32_t>(activeChunkHashes.size());
+                activeChunkHashes.push_back(hash);
 
                 std::lock_guard<std::mutex> lock(requestMutex);
                 requestedChunks.insert(hash);
-            } else if (state.cullIndex != 0xFFFFFFFF) {
-                cullArray[state.cullIndex].isActive = true;
+            }
+
+            if (state.cullIndex == 0xFFFFFFFF) {
+                state.cullIndex = static_cast<uint32_t>(cullArray.size());
+                CullData cd;
+                cd.hash = hash;
+                cd.minX = cx * 16.0f; cd.minY = cy * 16.0f; cd.minZ = cz * 16.0f;
+                cd.maxX = cd.minX + 16.0f; cd.maxY = cd.minY + 16.0f; cd.maxZ = cd.minZ + 16.0f;
+                cd.cmdIndex = state.cmdIndex;
+                cullArray.push_back(cd);
+            } else {
+                cullArray[state.cullIndex].cmdIndex = state.cmdIndex;
             }
         }
 
@@ -334,8 +373,38 @@ namespace NF::Render {
                 int pcy = static_cast<int>(std::floor(cameraPos.y)) >> 4;
                 int pcz = static_cast<int>(std::floor(cameraPos.z)) >> 4;
 
-                bool didWork = false;
+                // 1. FÁZIS: MEMÓRIA SZEMÉTSZEDŐ (UNLOADING)
+                std::vector<uint64_t> toUnload;
+                {
+                    std::lock_guard<std::mutex> lock(requestMutex);
+                    for (auto it = requestedChunks.begin(); it != requestedChunks.end(); ) {
+                        uint64_t hash = *it;
+                        int cx = (hash >> 42) & 0x3FFFFF; int cy = (hash >> 22) & 0xFFFFF; int cz = hash & 0x3FFFFF;
+                        if (cx & 0x200000) cx |= ~0x3FFFFF; if (cz & 0x200000) cz |= ~0x3FFFFF;
 
+                        int dx = cx - pcx; int dz = cz - pcz;
+                        // Ha kiment a renderDistance + 2 bufferzónából, kuka!
+                        if (dx*dx + dz*dz > (renderDistance + 2) * (renderDistance + 2)) {
+                            toUnload.push_back(hash);
+                            it = requestedChunks.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                }
+
+                if (!toUnload.empty()) {
+                    std::lock_guard<std::mutex> lock(uploadMutex);
+                    for (uint64_t h : toUnload) {
+                        ChunkTask task;
+                        task.type = TaskType::UNLOAD;
+                        task.hash = h;
+                        uploadQueue.push_back(std::move(task));
+                    }
+                }
+
+                // 2. FÁZIS: ÚJ CHUNKOK GENERÁLÁSA
+                bool didWork = false;
                 for (int r = 0; r <= renderDistance; ++r) {
                     for (int x = -r; x <= r; ++x) {
                         for (int z = -r; z <= r; ++z) {
@@ -361,11 +430,16 @@ namespace NF::Render {
 
                                     {
                                         std::lock_guard<std::mutex> lock(uploadMutex);
-                                        uploadQueue.push_back({hash, cx, cy, cz, std::move(newChunk), std::move(mesh)});
+                                        ChunkTask task;
+                                        task.type = TaskType::UPLOAD;
+                                        task.hash = hash; task.cx = cx; task.cy = cy; task.cz = cz;
+                                        task.newChunk = std::move(newChunk);
+                                        task.meshData = std::move(mesh);
+                                        uploadQueue.push_back(std::move(task));
                                     }
 
                                     didWork = true;
-                                    std::this_thread::sleep_for(std::chrono::microseconds(100)); // Felgyorsítva
+                                    std::this_thread::sleep_for(std::chrono::microseconds(100));
                                 }
                             }
                         }
@@ -376,7 +450,7 @@ namespace NF::Render {
         }
 
         void ProcessUploadQueue() {
-            std::vector<ChunkUploadTask> localQueue;
+            std::vector<ChunkTask> localQueue;
             {
                 std::lock_guard<std::mutex> lock(uploadMutex);
                 if (uploadQueue.empty()) return;
@@ -385,6 +459,44 @@ namespace NF::Render {
             }
 
             for (auto& task : localQueue) {
+                // ==========================================
+                // VRAM ÉS RAM FELSZABADÍTÁSA
+                // ==========================================
+                if (task.type == TaskType::UNLOAD) {
+                    auto it = chunkRenderStates.find(task.hash);
+                    if (it != chunkRenderStates.end()) {
+                        auto& state = it->second;
+                        if (state.cmdIndex != 0xFFFFFFFF) {
+                            megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
+                            freeVramSlots.push_back(state);
+                        }
+
+                        // O(1) Törlés a Cull listából
+                        if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) {
+                            uint32_t cIdx = state.cullIndex;
+                            cullArray[cIdx] = cullArray.back();
+                            chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx;
+                            cullArray.pop_back();
+                        }
+
+                        // O(1) Törlés a Hash listából
+                        if (state.activeHashIndex != 0xFFFFFFFF && state.activeHashIndex < activeChunkHashes.size()) {
+                            uint32_t aIdx = state.activeHashIndex;
+                            uint64_t lastHash = activeChunkHashes.back();
+                            activeChunkHashes[aIdx] = lastHash;
+                            chunkRenderStates[lastHash].activeHashIndex = aIdx;
+                            activeChunkHashes.pop_back();
+                        }
+
+                        chunkRenderStates.erase(it);
+                    }
+                    NF::Core::realWorld.erase(task.hash); // RAM felszabadítás!
+                    continue;
+                }
+
+                // ==========================================
+                // ÚJ CHUNK BEMÁSOLÁSA (VAGY ÚJRAHASZNOSÍTÁS)
+                // ==========================================
                 if (task.newChunk) NF::Core::realWorld[task.hash] = std::move(task.newChunk);
 
                 auto& state = chunkRenderStates[task.hash];
@@ -393,8 +505,18 @@ namespace NF::Render {
                 if (task.meshData.vertices.empty()) {
                     state.isEmpty = true;
                     if (!isNew) {
-                        megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
-                        if (state.cullIndex != 0xFFFFFFFF) cullArray[state.cullIndex].isActive = false;
+                        if (state.cmdIndex != 0xFFFFFFFF) {
+                            megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
+                            freeVramSlots.push_back(state);
+                            state.cmdIndex = 0xFFFFFFFF;
+                        }
+                        if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) {
+                            uint32_t cIdx = state.cullIndex;
+                            cullArray[cIdx] = cullArray.back();
+                            chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx;
+                            cullArray.pop_back();
+                            state.cullIndex = 0xFFFFFFFF;
+                        }
                     }
                     continue;
                 }
@@ -403,12 +525,35 @@ namespace NF::Render {
                 bool needsNewAlloc = isNew || (task.meshData.vertices.size() > state.maxV) || (task.meshData.indices.size() > state.maxI);
 
                 if (needsNewAlloc) {
-                    if (!isNew) megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
-                    uint32_t vCount = static_cast<uint32_t>(task.meshData.vertices.size() * 1.5f);
-                    uint32_t iCount = static_cast<uint32_t>(task.meshData.indices.size() * 1.5f);
+                    if (!isNew && state.cmdIndex != 0xFFFFFFFF) {
+                        megaArena.shadowIndirectData[state.cmdIndex].instanceCount = 0;
+                        freeVramSlots.push_back(state);
+                    }
 
-                    if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) continue;
-                    state.maxV = vCount; state.maxI = iCount;
+                    uint32_t vCount = static_cast<uint32_t>(task.meshData.vertices.size() * 1.2f);
+                    uint32_t iCount = static_cast<uint32_t>(task.meshData.indices.size() * 1.2f);
+
+                    // VRAM ÚJRAHASZNOSÍTÁS KERESÉSE
+                    bool foundReuse = false;
+                    for (size_t i = 0; i < freeVramSlots.size(); ++i) {
+                        if (freeVramSlots[i].maxV >= vCount && freeVramSlots[i].maxI >= iCount) {
+                            state.cmdIndex = freeVramSlots[i].cmdIndex;
+                            state.vOffset = freeVramSlots[i].vOffset;
+                            state.iOffset = freeVramSlots[i].iOffset;
+                            state.maxV = freeVramSlots[i].maxV;
+                            state.maxI = freeVramSlots[i].maxI;
+
+                            freeVramSlots[i] = freeVramSlots.back();
+                            freeVramSlots.pop_back();
+                            foundReuse = true;
+                            break;
+                        }
+                    }
+
+                    if (!foundReuse) {
+                        if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) continue;
+                        state.maxV = vCount; state.maxI = iCount;
+                    }
                 }
 
                 memcpy(megaArena.mappedVertexData + state.vOffset, task.meshData.vertices.data(), task.meshData.vertices.size() * sizeof(Vertex));
@@ -422,16 +567,20 @@ namespace NF::Render {
                 cmd.firstInstance = 0;
 
                 if (isNew) {
+                    state.activeHashIndex = static_cast<uint32_t>(activeChunkHashes.size());
+                    activeChunkHashes.push_back(task.hash);
+                }
+
+                if (state.cullIndex == 0xFFFFFFFF) {
+                    state.cullIndex = static_cast<uint32_t>(cullArray.size());
                     CullData cd;
+                    cd.hash = task.hash;
                     cd.minX = task.cx * 16.0f; cd.minY = task.cy * 16.0f; cd.minZ = task.cz * 16.0f;
                     cd.maxX = cd.minX + 16.0f; cd.maxY = cd.minY + 16.0f; cd.maxZ = cd.minZ + 16.0f;
                     cd.cmdIndex = state.cmdIndex;
-                    cd.isActive = true;
-
-                    state.cullIndex = static_cast<uint32_t>(cullArray.size());
                     cullArray.push_back(cd);
-                } else if (state.cullIndex != 0xFFFFFFFF) {
-                    cullArray[state.cullIndex].isActive = true;
+                } else {
+                    cullArray[state.cullIndex].cmdIndex = state.cmdIndex;
                 }
             }
         }
@@ -598,11 +747,11 @@ namespace NF::Render {
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.8f, 1.0f), "SYSTEM RESOURCES"); ImGui::Separator();
                 ImGui::Text("System RAM (Process): %.2f MB", ramMb);
                 ImGui::Text("VRAM (MDI Buffers): %.2f MB / %.1f MB", activeVramMb, totalMegaArenaCapacity);
+                ImGui::Text("Free VRAM Slots (Reused): %d", (int)freeVramSlots.size());
                 ImGui::Text("Active Vertices: %u", activeVertices);
 
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "ENGINE CONTROLS"); ImGui::Separator();
-                // MAX 128 LÁTÓTÁV!
                 ImGui::SliderInt("Render Distance", &renderDistance, 2, 128, "%d Chunks");
                 ImGui::Text("Mouse Status: %s (Press 'F' to toggle)", isMouseCaptured ? "Captured" : "Free");
 
@@ -629,12 +778,7 @@ namespace NF::Render {
             Frustum f = Frustum::extract(vp);
             currentlyDrawnChunks = 0;
 
-            // =================================================================
-            // A TITKOS FEGYVER: O(1) LINEÁRIS CULLING A RAM-BAN (ZÉRÓ PCI-E STALL)
-            // =================================================================
             for (const auto& cull : cullArray) {
-                if (!cull.isActive) continue;
-
                 if (f.isBoxVisible(cull.minX, cull.minY, cull.minZ, cull.maxX, cull.maxY, cull.maxZ)) {
                     megaArena.shadowIndirectData[cull.cmdIndex].instanceCount = 1;
                     currentlyDrawnChunks++;
@@ -645,7 +789,6 @@ namespace NF::Render {
 
             uint32_t activeCommands = megaArena.currentCommandCount.load(std::memory_order_relaxed);
             if (activeCommands > 0) {
-                // EGYETLEN DMA MÁSOLÁS A VIDEÓKÁRTYÁRA (A KAMION KIÜRÍTÉSE!)
                 memcpy(megaArena.mappedIndirectData, megaArena.shadowIndirectData.data(), activeCommands * sizeof(VkDrawIndexedIndirectCommand));
 
                 VkBuffer vertexBuffers[] = {megaArena.vertexBuffer}; VkDeviceSize offsets[] = {0};
