@@ -144,7 +144,6 @@ public:
                         }
                     }
 
-                    // A belső felfaló rutin innentől marad a régi (SweepMask)...
                     // A belső felfaló rutin (A "Mohó" rész)
                     auto SweepMask = [&](uint32_t* mask, bool isBackFace) {
                         for (int j = 0; j < 16; ++j) {

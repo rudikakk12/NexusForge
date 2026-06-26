@@ -1,31 +1,20 @@
 #version 450
 
-// Ezek a bemenetek, amiket a C++ Vertex struktúrából olvas fel
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
-layout(location = 2) in uint inPaletteID;
+layout(location = 2) in uint inBlockID;
 
-// Ezeket küldjük tovább a Fragment Shadernek
-layout(location = 0) out vec3 fragNormal;
-layout(location = 1) out vec3 fragColor;
-
-// Push Constant (Ez a kamera "lencséje", ezen keresztül látjuk a 3D világot)
 layout(push_constant) uniform PushConstants {
-    mat4 render_matrix;
-} push;
+    mat4 vp;
+} pc;
 
-// Egy gyors, ideiglenes paletta a teszthez
-vec3 getPaletteColor(uint id) {
-    if (id == 1) return vec3(0.5, 0.3, 0.1); // Föld
-    if (id == 2) return vec3(0.2, 0.8, 0.2); // Fű
-    if (id == 3) return vec3(0.5, 0.5, 0.5); // Kő
-    return vec3(0.8, 0.1, 0.8); // Ismeretlen blokk (Magenta)
-}
+layout(location = 0) out vec3 fragPos;
+layout(location = 1) out vec3 fragNormal;
+layout(location = 2) out flat uint fragBlockID;
 
 void main() {
-    // 3D pozíció beszorzása a kamerával
-    gl_Position = push.render_matrix * vec4(inPosition, 1.0);
-
+    gl_Position = pc.vp * vec4(inPosition, 1.0);
+    fragPos = inPosition;
     fragNormal = inNormal;
-    fragColor = getPaletteColor(inPaletteID);
+    fragBlockID = inBlockID;
 }

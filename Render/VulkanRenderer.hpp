@@ -107,7 +107,7 @@ namespace NF::Render {
             rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
             rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
             rasterizer.lineWidth = 1.0f;
-            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.cullMode = VK_CULL_MODE_NONE; // <--- VÉSZFÉK: CULLING KIKAPCSOLVA!
             rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
             VkPipelineMultisampleStateCreateInfo multisampling{};
@@ -142,8 +142,8 @@ namespace NF::Render {
 
             VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
             pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutInfo.setLayoutCount = 1;                     // ÚJ: A Descriptor Set Layout bekapcsolása
-            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;     // ÚJ: Textúra Array Layout átadása
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
             pipelineLayoutInfo.pushConstantRangeCount = 1;
             pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 

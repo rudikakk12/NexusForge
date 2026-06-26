@@ -1,7 +1,7 @@
 //
 // Fájl: Render/TextureManager.hpp
 // Készítette: NexusForge Engine (Rick & Gem)
-// Leírás: Vulkan 2D Texture Array betöltő a Lock-Free Palettához (32x32)
+// Leírás: Vulkan 2D Texture Array betöltő
 //
 #pragma once
 
@@ -24,7 +24,6 @@ namespace NF::Render {
         VkSampler textureSampler = VK_NULL_HANDLE;
 
         void LoadBlockTextures(VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue graphicsQueue, const std::string& folderPath) {
-            // BEÁLLÍTVA 32x32-RE
             const int texWidth = 32;
             const int texHeight = 32;
             const uint32_t layerCount = 256;
@@ -64,16 +63,17 @@ namespace NF::Render {
                 VkDeviceSize offset = i * layerSize;
 
                 if (!pixels) {
-                    // 32x32-es Missing Texture (Lila-fekete sakktábla) generálása a VRAM-ban
+                    // Klasszikus 8x8-as sűrűbb sakktábla generálása
                     std::vector<uint8_t> fallback(layerSize, 0);
                     for(int y = 0; y < texHeight; y++) {
                         for(int x = 0; x < texWidth; x++) {
-                            bool isMagenta = ((x / 16) + (y / 16)) % 2 == 0;
+                            // Sűrűbb rács (x/4 és y/4)
+                            bool isMagenta = ((x / 4) + (y / 4)) % 2 == 0;
                             int pOffset = (y * texWidth + x) * 4;
                             fallback[pOffset + 0] = isMagenta ? 255 : 0;   // R
                             fallback[pOffset + 1] = 0;                     // G
                             fallback[pOffset + 2] = isMagenta ? 255 : 0;   // B
-                            fallback[pOffset + 3] = i == 0 ? 0 : 255;      // A
+                            fallback[pOffset + 3] = i == 0 ? 0 : 255;      // A (A levegő - 0-s ID - maradjon átlátszó)
                         }
                     }
                     memcpy(static_cast<uint8_t*>(data) + offset, fallback.data(), layerSize);
@@ -111,7 +111,7 @@ namespace NF::Render {
             vkAllocateMemory(device, &allocInfo, nullptr, &textureArrayMemory);
             vkBindImageMemory(device, textureArrayImage, textureArrayMemory, 0);
 
-            // 4. MÁSOLÁS A STAGING BUFFERBŐL A GPU VRAM-BA
+            // 4. MÁSOLÁS A STAGING BUFFERBŐL A GPU VRAM-BA (KŐKEMÉNY SZINKRONIZÁCIÓVAL)
             VkCommandBuffer cmd = CommandManager::CreateCommandBuffer(device, commandPool);
             CommandManager::BeginCommandBuffer(cmd);
 
@@ -132,12 +132,29 @@ namespace NF::Render {
             TransitionImageLayout(cmd, textureArrayImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layerCount);
 
             CommandManager::EndCommandBuffer(cmd);
-            VkSubmitInfo submitInfo{}; submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1; submitInfo.pCommandBuffers = &cmd;
-            vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-            vkQueueWaitIdle(graphicsQueue);
+
+            // JAVÍTVA: Fence (Kordon) beállítása. Megvárjuk amíg a GPU végez!
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            VkFence uploadFence;
+            vkCreateFence(device, &fenceInfo, nullptr, &uploadFence);
+
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &cmd;
+
+            if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS) {
+                throw std::runtime_error("[Textura] Hiba a GPU masolasi parancs bekuldesekor!");
+            }
+
+            // Kőkemény várakozás a CPU-val, mielőtt kitörölnénk a Staging Buffert!
+            vkWaitForFences(device, 1, &uploadFence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(device, uploadFence, nullptr);
+
             vkFreeCommandBuffers(device, commandPool, 1, &cmd);
 
+            // Csak most, hogy a GPU végzett, töröljük a CPU memóriát!
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
 
