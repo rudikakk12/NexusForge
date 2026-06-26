@@ -42,9 +42,22 @@ namespace NF::Render {
 
     class BasicMesher {
     private:
-        static inline uint8_t GetVoxelSafe(const uint8_t* voxels, int x, int y, int z) {
-            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return 0;
-            return voxels[x + (y * 16) + (z * 256)];
+        static inline uint8_t GetVoxelSafe(
+                    const uint8_t* center,
+                    const uint8_t* pX, const uint8_t* nX, // Szomszédok X tengelyen (+ és -)
+                    const uint8_t* pY, const uint8_t* nY, // Szomszédok Y tengelyen
+                    const uint8_t* pZ, const uint8_t* nZ, // Szomszédok Z tengelyen
+                    int x, int y, int z)
+        {
+            if (x >= 16) return pX ? pX[(0) + (y * 16) + (z * 256)] : 0;
+            if (x < 0)   return nX ? nX[(15) + (y * 16) + (z * 256)] : 0;
+            if (y >= 16) return pY ? pY[x + (0 * 16) + (z * 256)] : 0;
+            if (y < 0)   return nY ? nY[x + (15 * 16) + (z * 256)] : 0;
+            if (z >= 16) return pZ ? pZ[x + (y * 16) + (0 * 256)] : 0;
+            if (z < 0)   return nZ ? nZ[x + (y * 16) + (15 * 256)] : 0;
+
+            // Ha a határokon belül vagyunk, a saját voxelek kellenek
+            return center[x + (y * 16) + (z * 256)];
         }
 
         // Tökéletesített Vektor-alapú Quad Generátor
@@ -86,8 +99,12 @@ namespace NF::Render {
             }
         }
 
-    public:
-        static MeshData GenerateMesh(NF::Core::MacroChunk_Small& chunk, int offsetX = 0, int offsetY = 0, int offsetZ = 0) {
+public:
+        // FRISSÍTETT SZIGNATÚRA: Befogadja a 6 szomszéd Chunk adat-pointerét!
+        static MeshData GenerateMesh(NF::Core::MacroChunk_Small& chunk, int offsetX = 0, int offsetY = 0, int offsetZ = 0,
+                                     const uint8_t* pX = nullptr, const uint8_t* nX = nullptr,
+                                     const uint8_t* pY = nullptr, const uint8_t* nY = nullptr,
+                                     const uint8_t* pZ = nullptr, const uint8_t* nZ = nullptr) {
             MeshData mesh;
             mesh.vertices.reserve(1024);
             mesh.indices.reserve(1536);
@@ -111,9 +128,10 @@ namespace NF::Render {
                     for (x[v] = 0; x[v] < 16; ++x[v]) {
                         for (x[u] = 0; x[u] < 16; ++x[u]) {
 
-                            // A C++ tömb-varázslat: az x[0,1,2] automatikusan beáll a jó tengelyre!
-                            uint8_t b1 = (x[d] >= 0) ? GetVoxelSafe(voxels, x[0], x[1], x[2]) : 0;
-                            uint8_t b2 = (x[d] < 15) ? GetVoxelSafe(voxels, x[0]+q[0], x[1]+q[1], x[2]+q[2]) : 0;
+                            // JAVÍTVA: Nincs több hardcoded bounds check!
+                            // A GetVoxelSafe elintézi a határokat a szomszédokból.
+                            uint8_t b1 = GetVoxelSafe(voxels, pX, nX, pY, nY, pZ, nZ, x[0], x[1], x[2]);
+                            uint8_t b2 = GetVoxelSafe(voxels, pX, nX, pY, nY, pZ, nZ, x[0]+q[0], x[1]+q[1], x[2]+q[2]);
 
                             bool solid1 = (b1 != 0);
                             bool solid2 = (b2 != 0);
@@ -126,6 +144,7 @@ namespace NF::Render {
                         }
                     }
 
+                    // A belső felfaló rutin innentől marad a régi (SweepMask)...
                     // A belső felfaló rutin (A "Mohó" rész)
                     auto SweepMask = [&](uint32_t* mask, bool isBackFace) {
                         for (int j = 0; j < 16; ++j) {

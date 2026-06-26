@@ -66,13 +66,21 @@ namespace NF::Render {
         bool isEmpty = true;
     };
 
-    enum class TaskType { UPLOAD, UNLOAD };
+    enum class TaskType { TERRAIN_GENERATED, MESH_READY, UNLOAD };
     struct ChunkTask {
         TaskType type;
         uint64_t hash;
         int cx, cy, cz;
         std::unique_ptr<NF::Core::MacroChunk_Small> newChunk;
         NF::Render::MeshData meshData;
+    };
+
+    // A Lock-Free hálósítás Szent Grálja
+    struct MeshJob {
+        uint64_t hash;
+        int cx, cy, cz;
+        NF::Core::MacroChunk_Small* center;
+        const uint8_t *pX, *nX, *pY, *nY, *pZ, *nZ;
     };
 
     class VulkanCore {
@@ -170,6 +178,10 @@ namespace NF::Render {
         std::vector<std::pair<float, float>> frameHistory;
         float avg1s = 0.0f;
         float avg10s = 0.0f;
+
+        std::mutex jobMutex;
+        std::vector<MeshJob> pendingMeshJobs;
+        std::unordered_set<uint64_t> dispatchedMeshes; // Ez szigorúan csak a főszálon él!
 
         void initWindow() {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
@@ -293,8 +305,15 @@ namespace NF::Render {
         void UpdateSingleChunk(uint64_t hash, int cx, int cy, int cz) {
             vkDeviceWaitIdle(device);
 
-            auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(*NF::Core::realWorld[hash], cx, cy, cz);
-            auto& state = chunkRenderStates[hash];
+            // Megkeressük a memóriában a szomszédos chunkok pointereit (Ha nincsenek ott, nullptr lesz)
+            const uint8_t* pX = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx+1, cy, cz)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx+1, cy, cz)]->tickAfter : nullptr;
+            const uint8_t* nX = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx-1, cy, cz)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx-1, cy, cz)]->tickAfter : nullptr;
+            const uint8_t* pY = (cy < 3 && NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy+1, cz))) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy+1, cz)]->tickAfter : nullptr;
+            const uint8_t* nY = (cy > 0 && NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy-1, cz))) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy-1, cz)]->tickAfter : nullptr;
+            const uint8_t* pZ = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy, cz+1)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy, cz+1)]->tickAfter : nullptr;
+            const uint8_t* nZ = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy, cz-1)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy, cz-1)]->tickAfter : nullptr;
+
+            auto chunkMesh = NF::Render::BasicMesher::GenerateMesh(*NF::Core::realWorld[hash], cx, cy, cz, pX, nX, pY, nY, pZ, nZ);            auto& state = chunkRenderStates[hash];
             bool isNew = (state.cmdIndex == 0xFFFFFFFF);
 
             if (chunkMesh.vertices.empty()) {
@@ -358,33 +377,48 @@ namespace NF::Render {
         }
 
     private:
-        void AsyncChunkWorker() {
-            int lastPcx = -999999;
-            int lastPcz = -999999;
+void AsyncChunkWorker() {
+            int lastPcx = -999999; int lastPcz = -999999;
 
             while (workerRunning) {
                 int pcx = static_cast<int>(std::floor(cameraPos.x)) >> 4;
-                int pcy = static_cast<int>(std::floor(cameraPos.y)) >> 4;
                 int pcz = static_cast<int>(std::floor(cameraPos.z)) >> 4;
+                bool didWork = false;
 
+                // 1. FÁZIS: MESH JOBOK KIVÉGZÉSE (Amit a főszál összekészített nekünk!)
+                std::vector<MeshJob> localJobs;
+                {
+                    std::lock_guard<std::mutex> lock(jobMutex);
+                    localJobs = std::move(pendingMeshJobs);
+                    pendingMeshJobs.clear();
+                }
+
+                for (const auto& job : localJobs) {
+                    auto mesh = NF::Render::BasicMesher::GenerateMesh(*job.center, job.cx, job.cy, job.cz, job.pX, job.nX, job.pY, job.nY, job.pZ, job.nZ);
+
+                    std::lock_guard<std::mutex> lock(uploadMutex);
+                    ChunkTask task; task.type = TaskType::MESH_READY; task.hash = job.hash; task.cx = job.cx; task.cy = job.cy; task.cz = job.cz;
+                    task.meshData = std::move(mesh);
+                    uploadQueue.push_back(std::move(task));
+                    didWork = true;
+                }
+
+                // 2. FÁZIS: TEREPGENERÁLÁS (Csak a nyers blokk adatok, mesh nélkül!)
                 if (pcx != lastPcx || pcz != lastPcz) {
                     lastPcx = pcx; lastPcz = pcz;
-
                     std::vector<uint64_t> toUnload;
                     {
                         std::lock_guard<std::mutex> lock(requestMutex);
                         for (auto it = requestedChunks.begin(); it != requestedChunks.end(); ) {
                             uint64_t hash = *it;
-                            int cx = (hash >> 42) & 0x3FFFFF; int cy = (hash >> 22) & 0xFFFFF; int cz = hash & 0x3FFFFF;
+                            int cx = (hash >> 42) & 0x3FFFFF; int cz = hash & 0x3FFFFF;
                             if (cx & 0x200000) cx |= ~0x3FFFFF; if (cz & 0x200000) cz |= ~0x3FFFFF;
-
                             int dx = cx - pcx; int dz = cz - pcz;
                             if (dx*dx + dz*dz > (renderDistance + 2) * (renderDistance + 2)) {
                                 toUnload.push_back(hash); it = requestedChunks.erase(it);
                             } else { ++it; }
                         }
                     }
-
                     if (!toUnload.empty()) {
                         std::lock_guard<std::mutex> lock(unloadMutex);
                         for (uint64_t h : toUnload) {
@@ -392,8 +426,6 @@ namespace NF::Render {
                         }
                     }
                 }
-
-                bool didWork = false;
 
                 for (int r = 0; r <= renderDistance; ++r) {
                     for (int x = -r; x <= r; ++x) {
@@ -404,27 +436,25 @@ namespace NF::Render {
                                 int cx = pcx + x; int cz = pcz + z;
                                 uint64_t hash = NF::Core::GetChunkHash(cx, cy, cz);
 
-                                bool needsWork = false;
+                                bool needsGen = false;
                                 {
                                     std::lock_guard<std::mutex> lock(requestMutex);
                                     if (requestedChunks.find(hash) == requestedChunks.end()) {
-                                        requestedChunks.insert(hash); needsWork = true;
+                                        requestedChunks.insert(hash); needsGen = true;
                                     }
                                 }
 
-                                if (needsWork) {
+                                if (needsGen) {
                                     NF::Core::WorldGenerator terrainGen;
                                     auto newChunk = std::make_unique<NF::Core::MacroChunk_Small>();
                                     terrainGen.Generate(*newChunk, cx, cy, cz);
-                                    auto mesh = NF::Render::BasicMesher::GenerateMesh(*newChunk, cx, cy, cz);
 
                                     {
                                         std::lock_guard<std::mutex> lock(uploadMutex);
-                                        ChunkTask task; task.type = TaskType::UPLOAD; task.hash = hash; task.cx = cx; task.cy = cy; task.cz = cz;
-                                        task.newChunk = std::move(newChunk); task.meshData = std::move(mesh);
+                                        ChunkTask task; task.type = TaskType::TERRAIN_GENERATED; task.hash = hash; task.cx = cx; task.cy = cy; task.cz = cz;
+                                        task.newChunk = std::move(newChunk);
                                         uploadQueue.push_back(std::move(task));
                                     }
-
                                     didWork = true;
 
                                     while (workerRunning) {
@@ -433,21 +463,48 @@ namespace NF::Render {
                                         if (!queueFull) break;
                                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                                     }
-
-                                    int currentPcx = static_cast<int>(std::floor(cameraPos.x)) >> 4;
-                                    int currentPcz = static_cast<int>(std::floor(cameraPos.z)) >> 4;
-                                    if (currentPcx != lastPcx || currentPcz != lastPcz) goto worker_loop_restart;
                                 }
                             }
                         }
                     }
                 }
-            worker_loop_restart:
                 if (!didWork) std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
 
-        void ProcessTaskQueues() {
+        void CheckAndDispatchMeshJob(int cx, int cy, int cz) {
+            if (cy < 0 || cy >= 4) return;
+            uint64_t hash = NF::Core::GetChunkHash(cx, cy, cz);
+
+            if (NF::Core::realWorld.find(hash) == NF::Core::realWorld.end()) return;
+            if (dispatchedMeshes.find(hash) != dispatchedMeshes.end()) return; // Már fut/kész
+
+            const uint8_t* pX = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx+1, cy, cz)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx+1, cy, cz)]->tickAfter : nullptr;
+            const uint8_t* nX = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx-1, cy, cz)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx-1, cy, cz)]->tickAfter : nullptr;
+            const uint8_t* pY = (cy < 3 && NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy+1, cz))) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy+1, cz)]->tickAfter : nullptr;
+            const uint8_t* nY = (cy > 0 && NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy-1, cz))) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy-1, cz)]->tickAfter : nullptr;
+            const uint8_t* pZ = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy, cz+1)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy, cz+1)]->tickAfter : nullptr;
+            const uint8_t* nZ = NF::Core::realWorld.count(NF::Core::GetChunkHash(cx, cy, cz-1)) ? NF::Core::realWorld[NF::Core::GetChunkHash(cx, cy, cz-1)]->tickAfter : nullptr;
+
+            bool hasAllNeighbors = true;
+            if (!pX || !nX || !pZ || !nZ) hasAllNeighbors = false;
+            if (cy < 3 && !pY) hasAllNeighbors = false;
+            if (cy > 0 && !nY) hasAllNeighbors = false;
+
+            if (hasAllNeighbors) {
+                MeshJob job;
+                job.hash = hash; job.cx = cx; job.cy = cy; job.cz = cz;
+                job.center = NF::Core::realWorld[hash].get();
+                job.pX = pX; job.nX = nX; job.pY = pY; job.nY = nY; job.pZ = pZ; job.nZ = nZ;
+
+                dispatchedMeshes.insert(hash);
+
+                std::lock_guard<std::mutex> lock(jobMutex);
+                pendingMeshJobs.push_back(job);
+            }
+        }
+
+void ProcessTaskQueues() {
             std::vector<ChunkTask> localUnloads;
             {
                 std::lock_guard<std::mutex> lock(unloadMutex);
@@ -460,17 +517,16 @@ namespace NF::Render {
                 if (it != chunkRenderStates.end()) {
                     auto& state = it->second;
                     if (state.cmdIndex != 0xFFFFFFFF) freeVramSlots.push_back(state);
-
                     if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) {
                         uint32_t cIdx = state.cullIndex; cullArray[cIdx] = cullArray.back(); chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx; cullArray.pop_back();
                     }
-
                     if (state.activeHashIndex != 0xFFFFFFFF && state.activeHashIndex < activeChunkHashes.size()) {
                         uint32_t aIdx = state.activeHashIndex; uint64_t lastHash = activeChunkHashes.back(); activeChunkHashes[aIdx] = lastHash; chunkRenderStates[lastHash].activeHashIndex = aIdx; activeChunkHashes.pop_back();
                     }
                     chunkRenderStates.erase(it);
                 }
                 NF::Core::realWorld.erase(task.hash);
+                dispatchedMeshes.erase(task.hash); // Ezt ki kell venni a pool-ból!
             }
 
             {
@@ -491,58 +547,73 @@ namespace NF::Render {
                 { std::lock_guard<std::mutex> lock(requestMutex); isStillRequested = (requestedChunks.find(task.hash) != requestedChunks.end()); }
                 if (!isStillRequested) continue;
 
-                if (task.newChunk) NF::Core::realWorld[task.hash] = std::move(task.newChunk);
+                // HA ÚJ BLOKK ADAT JÖTT, BERAKJUK ÉS MEGNÉZZÜK KINYÍLT-E AZ ÚT A MESHINGNEK!
+                if (task.type == TaskType::TERRAIN_GENERATED) {
+                    NF::Core::realWorld[task.hash] = std::move(task.newChunk);
 
-                auto& state = chunkRenderStates[task.hash];
-                bool isNew = (state.cmdIndex == 0xFFFFFFFF);
-
-                if (task.meshData.vertices.empty()) {
-                    state.isEmpty = true;
-                    if (!isNew) {
-                        if (state.cmdIndex != 0xFFFFFFFF) { freeVramSlots.push_back(state); state.cmdIndex = 0xFFFFFFFF; }
-                        if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) { uint32_t cIdx = state.cullIndex; cullArray[cIdx] = cullArray.back(); chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx; cullArray.pop_back(); state.cullIndex = 0xFFFFFFFF; }
-                    }
-                    continue;
+                    CheckAndDispatchMeshJob(task.cx, task.cy, task.cz);
+                    CheckAndDispatchMeshJob(task.cx+1, task.cy, task.cz);
+                    CheckAndDispatchMeshJob(task.cx-1, task.cy, task.cz);
+                    CheckAndDispatchMeshJob(task.cx, task.cy+1, task.cz);
+                    CheckAndDispatchMeshJob(task.cx, task.cy-1, task.cz);
+                    CheckAndDispatchMeshJob(task.cx, task.cy, task.cz+1);
+                    CheckAndDispatchMeshJob(task.cx, task.cy, task.cz-1);
+                    continue; // Ide nem kell VRAM allokáció, irány a kövi elem!
                 }
 
-                state.isEmpty = false;
-                bool needsNewAlloc = isNew || (task.meshData.vertices.size() > state.maxV) || (task.meshData.indices.size() > state.maxI);
+                // HA KÉSZ A MESH, JÖHET AZ UPLOAD
+                if (task.type == TaskType::MESH_READY) {
+                    auto& state = chunkRenderStates[task.hash];
+                    bool isNew = (state.cmdIndex == 0xFFFFFFFF);
 
-                if (needsNewAlloc) {
-                    if (!isNew && state.cmdIndex != 0xFFFFFFFF) freeVramSlots.push_back(state);
-
-                    uint32_t vCount = static_cast<uint32_t>(task.meshData.vertices.size() * 1.2f);
-                    uint32_t iCount = static_cast<uint32_t>(task.meshData.indices.size() * 1.2f);
-
-                    bool foundReuse = false;
-                    for (size_t i = 0; i < freeVramSlots.size(); ++i) {
-                        if (freeVramSlots[i].maxV >= vCount && freeVramSlots[i].maxI >= iCount) {
-                            state.cmdIndex = freeVramSlots[i].cmdIndex; state.vOffset = freeVramSlots[i].vOffset; state.iOffset = freeVramSlots[i].iOffset; state.maxV = freeVramSlots[i].maxV; state.maxI = freeVramSlots[i].maxI;
-                            freeVramSlots[i] = freeVramSlots.back(); freeVramSlots.pop_back(); foundReuse = true; break;
+                    if (task.meshData.vertices.empty()) {
+                        state.isEmpty = true;
+                        if (!isNew) {
+                            if (state.cmdIndex != 0xFFFFFFFF) { freeVramSlots.push_back(state); state.cmdIndex = 0xFFFFFFFF; }
+                            if (state.cullIndex != 0xFFFFFFFF && state.cullIndex < cullArray.size()) { uint32_t cIdx = state.cullIndex; cullArray[cIdx] = cullArray.back(); chunkRenderStates[cullArray[cIdx].hash].cullIndex = cIdx; cullArray.pop_back(); state.cullIndex = 0xFFFFFFFF; }
                         }
+                        continue;
                     }
 
-                    if (!foundReuse) { if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) continue; state.maxV = vCount; state.maxI = iCount; }
+                    state.isEmpty = false;
+                    bool needsNewAlloc = isNew || (task.meshData.vertices.size() > state.maxV) || (task.meshData.indices.size() > state.maxI);
+
+                    if (needsNewAlloc) {
+                        if (!isNew && state.cmdIndex != 0xFFFFFFFF) freeVramSlots.push_back(state);
+
+                        uint32_t vCount = static_cast<uint32_t>(task.meshData.vertices.size() * 1.2f);
+                        uint32_t iCount = static_cast<uint32_t>(task.meshData.indices.size() * 1.2f);
+
+                        bool foundReuse = false;
+                        for (size_t i = 0; i < freeVramSlots.size(); ++i) {
+                            if (freeVramSlots[i].maxV >= vCount && freeVramSlots[i].maxI >= iCount) {
+                                state.cmdIndex = freeVramSlots[i].cmdIndex; state.vOffset = freeVramSlots[i].vOffset; state.iOffset = freeVramSlots[i].iOffset; state.maxV = freeVramSlots[i].maxV; state.maxI = freeVramSlots[i].maxI;
+                                freeVramSlots[i] = freeVramSlots.back(); freeVramSlots.pop_back(); foundReuse = true; break;
+                            }
+                        }
+
+                        if (!foundReuse) { if (!megaArena.Allocate(vCount, iCount, state.cmdIndex, state.vOffset, state.iOffset)) continue; state.maxV = vCount; state.maxI = iCount; }
+                    }
+
+                    memcpy(megaArena.mappedVertexData + state.vOffset, task.meshData.vertices.data(), task.meshData.vertices.size() * sizeof(Vertex));
+                    memcpy(megaArena.mappedIndexData + state.iOffset, task.meshData.indices.data(), task.meshData.indices.size() * sizeof(uint32_t));
+
+                    VkDrawIndexedIndirectCommand& cmd = masterCommands[state.cmdIndex];
+                    cmd.indexCount = static_cast<uint32_t>(task.meshData.indices.size());
+                    cmd.instanceCount = 1; cmd.firstIndex = state.iOffset; cmd.vertexOffset = state.vOffset; cmd.firstInstance = 0;
+
+                    if (isNew) { state.activeHashIndex = static_cast<uint32_t>(activeChunkHashes.size()); activeChunkHashes.push_back(task.hash); }
+
+                    if (state.cullIndex == 0xFFFFFFFF) {
+                        state.cullIndex = static_cast<uint32_t>(cullArray.size());
+                        CullData cd; cd.hash = task.hash; cd.minX = task.cx * 16.0f; cd.minY = task.cy * 16.0f; cd.minZ = task.cz * 16.0f; cd.maxX = cd.minX + 16.0f; cd.maxY = cd.minY + 16.0f; cd.maxZ = cd.minZ + 16.0f; cd.cmdIndex = state.cmdIndex;
+                        cullArray.push_back(cd);
+                    } else { cullArray[state.cullIndex].cmdIndex = state.cmdIndex; }
+
+                    auto now = std::chrono::high_resolution_clock::now();
+                    float elapsedMs = std::chrono::duration<float, std::milli>(now - uploadStartTime).count();
+                    if (elapsedMs > 4.0f) break;
                 }
-
-                memcpy(megaArena.mappedVertexData + state.vOffset, task.meshData.vertices.data(), task.meshData.vertices.size() * sizeof(Vertex));
-                memcpy(megaArena.mappedIndexData + state.iOffset, task.meshData.indices.data(), task.meshData.indices.size() * sizeof(uint32_t));
-
-                VkDrawIndexedIndirectCommand& cmd = masterCommands[state.cmdIndex];
-                cmd.indexCount = static_cast<uint32_t>(task.meshData.indices.size());
-                cmd.instanceCount = 1; cmd.firstIndex = state.iOffset; cmd.vertexOffset = state.vOffset; cmd.firstInstance = 0;
-
-                if (isNew) { state.activeHashIndex = static_cast<uint32_t>(activeChunkHashes.size()); activeChunkHashes.push_back(task.hash); }
-
-                if (state.cullIndex == 0xFFFFFFFF) {
-                    state.cullIndex = static_cast<uint32_t>(cullArray.size());
-                    CullData cd; cd.hash = task.hash; cd.minX = task.cx * 16.0f; cd.minY = task.cy * 16.0f; cd.minZ = task.cz * 16.0f; cd.maxX = cd.minX + 16.0f; cd.maxY = cd.minY + 16.0f; cd.maxZ = cd.minZ + 16.0f; cd.cmdIndex = state.cmdIndex;
-                    cullArray.push_back(cd);
-                } else { cullArray[state.cullIndex].cmdIndex = state.cmdIndex; }
-
-                auto now = std::chrono::high_resolution_clock::now();
-                float elapsedMs = std::chrono::duration<float, std::milli>(now - uploadStartTime).count();
-                if (elapsedMs > 4.0f) break;
             }
         }
 

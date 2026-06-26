@@ -24,13 +24,17 @@ namespace NF::Core {
         TerrainConfig config;
 
         // Gyors, belső pszeudo-random Hash függvény 2D koordinátákhoz
+        // JAVÍTOTT: Gyors Bitwise DOD Hash (nincs std::sin lebegőpontos lassulás!)
         float Random2D(float x, float y) const {
-            float dot = x * 12.9898f + y * 78.233f;
-            float sinVal = std::sin(dot) * 43758.5453123f;
-            return sinVal - std::floor(sinVal); // std::fract megfelelője
+            uint32_t a = static_cast<uint32_t>(static_cast<int32_t>(x));
+            uint32_t b = static_cast<uint32_t>(static_cast<int32_t>(y));
+            a *= 3284157443u; b ^= a << 16 | a >> 16;
+            b *= 1911520717u; a ^= b << 16 | b >> 16;
+            a *= 2048419325u;
+            return static_cast<float>(a) / 4294967295.0f; // 0.0 és 1.0 között
         }
 
-        // Bilineárisan interpolált zaj (Value Noise)
+        // JAVÍTOTT: Tökéletes bilineáris interpoláció
         float SmoothNoise(float x, float y) const {
             float ix = std::floor(x); float iy = std::floor(y);
             float fx = x - ix; float fy = y - iy;
@@ -40,11 +44,11 @@ namespace NF::Core {
             float c = Random2D(ix, iy + 1.0f);
             float d = Random2D(ix + 1.0f, iy + 1.0f);
 
-            // Hermite interpoláció s-görbével
             float ux = fx * fx * (3.0f - 2.0f * fx);
             float uy = fy * fy * (3.0f - 2.0f * fy);
 
-            return a + ux * (b - a) + uy * (c * (1.0f - ux) - a * uy) + ux * uy * (a - b - c + d);
+            // A MATEK HELYRE RAKVA!
+            return a + ux * (b - a) + uy * (c - a) + ux * uy * (a - b - c + d);
         }
 
         // Fraktál Brown-mozgás (fBm) az igazi hegyvonulatokhoz
@@ -68,12 +72,15 @@ namespace NF::Core {
 
         void SetConfig(const TerrainConfig& cfg) { config = cfg; }
 
-        void Generate(MacroChunk_Small& chunk, int cx, int cy, int cz) const {
-            // Paletta a shadernek (Később ez a Textúra ID lesz!)
-            chunk.PaletteGlobalBlockStateIDs[1] = 1; // Fű
-            chunk.PaletteGlobalBlockStateIDs[2] = 2; // Föld
-            chunk.PaletteGlobalBlockStateIDs[3] = 3; // Kő
-            chunk.PaletteGlobalBlockStateIDs[4] = 4; // Homok / Víz alatti rész
+void Generate(MacroChunk_Small& chunk, int cx, int cy, int cz) const {
+            // Paletta a shadernek - HIVATALOS GLOBAL ID-K BEKÖTÉSE!
+            chunk.PaletteGlobalBlockStateIDs[0] = 0; // Levegő
+            chunk.PaletteGlobalBlockStateIDs[1] = 1; // Föld (barna)
+            chunk.PaletteGlobalBlockStateIDs[2] = 2; // Fű (zöld tetejű)
+            chunk.PaletteGlobalBlockStateIDs[3] = 3; // Kő (sima)
+            chunk.PaletteGlobalBlockStateIDs[4] = 4; // Zúzottkő
+            chunk.PaletteGlobalBlockStateIDs[5] = 5; // Obszidián
+            chunk.activePaletteSize = 6; // Hivatalosan regisztráltuk mind a 6-ot
 
             for (int z = 0; z < 16; ++z) {
                 for (int x = 0; x < 16; ++x) {
@@ -93,11 +100,11 @@ namespace NF::Core {
                         if (globalY > surfaceHeight) {
                             blockID = 0; // Levegő
                         } else if (globalY == surfaceHeight) {
-                            blockID = 1; // Felszín (Fű)
+                            blockID = 2; // FŰ (A 2-es a fű!)
                         } else if (globalY >= surfaceHeight - 3) {
-                            blockID = 2; // Alatta pár block Föld
+                            blockID = 1; // FÖLD (Az 1-es a föld!)
                         } else {
-                            blockID = 3; // Mélyen Kő
+                            blockID = 3; // KŐ
                         }
 
                         if (blockID != 0) {
