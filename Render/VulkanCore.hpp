@@ -41,6 +41,7 @@
 #include "TelemetryHUD.hpp"
 #include "../Core/Physics.hpp"
 #include "../Core/World.hpp"
+#include "../Core/WorldGeneration.hpp" // <-- BEKÖTVE A GENERÁTOR
 
 extern void BreakBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz);
 extern void PlaceBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz, uint8_t blockID);
@@ -412,8 +413,9 @@ namespace NF::Render {
                                 }
 
                                 if (needsWork) {
+                                    NF::Core::WorldGenerator terrainGen;
                                     auto newChunk = std::make_unique<NF::Core::MacroChunk_Small>();
-                                    NF::Core::GenerateTerrain(*newChunk, cx, cy, cz);
+                                    terrainGen.Generate(*newChunk, cx, cy, cz);
                                     auto mesh = NF::Render::BasicMesher::GenerateMesh(*newChunk, cx, cy, cz);
 
                                     {
@@ -427,7 +429,7 @@ namespace NF::Render {
 
                                     while (workerRunning) {
                                         bool queueFull = false;
-                                        { std::lock_guard<std::mutex> lock(uploadMutex); queueFull = uploadQueue.size() >= 16; }
+                                        { std::lock_guard<std::mutex> lock(uploadMutex); queueFull = uploadQueue.size() >= 2000; }
                                         if (!queueFull) break;
                                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                                     }
@@ -477,7 +479,7 @@ namespace NF::Render {
                 uploadQueue.clear();
             }
 
-            int uploadsThisFrame = 0;
+            auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
             while (!mainThreadTaskQueue.empty()) {
                 auto task = std::move(mainThreadTaskQueue.front());
@@ -538,8 +540,9 @@ namespace NF::Render {
                     cullArray.push_back(cd);
                 } else { cullArray[state.cullIndex].cmdIndex = state.cmdIndex; }
 
-                uploadsThisFrame++;
-                if (uploadsThisFrame >= 16) break;
+                auto now = std::chrono::high_resolution_clock::now();
+                float elapsedMs = std::chrono::duration<float, std::milli>(now - uploadStartTime).count();
+                if (elapsedMs > 4.0f) break;
             }
         }
 
@@ -580,8 +583,11 @@ namespace NF::Render {
             if (spaceIsPressed && !spaceWasPressed) { if (currentTime - lastSpacePressTime < 0.3f) player.isFlying = !player.isFlying; lastSpacePressTime = currentTime; }
             spaceWasPressed = spaceIsPressed;
 
-            float moveForce = 50.0f * deltaTime;
-            if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS && !player.isFlying) moveForce *= 2.0f;
+            float baseForce = 50.0f;
+            if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) baseForce *= 5.0f;
+
+            float moveForce = baseForce * deltaTime;
+            if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS && !player.isFlying) moveForce *= 0.5f;
             if (!player.isGrounded && !player.isFlying) moveForce *= 0.1f;
 
             Vec3 forwardFlat = {cameraFront.x, 0.0f, cameraFront.z}; forwardFlat = forwardFlat.normalize(); Vec3 rightFlat = forwardFlat.cross(cameraUp).normalize();
@@ -589,9 +595,10 @@ namespace NF::Render {
             if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { player.velocity.x -= forwardFlat.x * moveForce; player.velocity.z -= forwardFlat.z * moveForce; }
             if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.velocity.x -= rightFlat.x * moveForce; player.velocity.z -= rightFlat.z * moveForce; }
             if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.velocity.x += rightFlat.x * moveForce; player.velocity.z += rightFlat.z * moveForce; }
+
             if (player.isFlying) {
-                if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) player.velocity.y += 50.0f * deltaTime;
-                if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) player.velocity.y -= 50.0f * deltaTime;
+                if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) player.velocity.y += baseForce * deltaTime;
+                if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) player.velocity.y -= baseForce * deltaTime;
             } else { if (spaceIsPressed && player.isGrounded) player.velocity.y = 10.0f; }
 
             NF::Core::Physics::UpdateEntityPhysics(player, deltaTime);
@@ -682,7 +689,7 @@ namespace NF::Render {
             {
                 std::lock_guard<std::mutex> lock(uploadMutex);
                 totalPendingUploads += uploadQueue.size();
-                isWorkerThrottledFlag = uploadQueue.size() >= 16;
+                isWorkerThrottledFlag = uploadQueue.size() >= 2000;
             }
 
             int totalPendingUnloads = 0;
