@@ -28,6 +28,16 @@ void BreakBlockAndRemesh(int32_t gx, int32_t gy, int32_t gz) {
     it->second->tickNow[localIndex] = 0;
     it->second->tickAfter[localIndex] = 0;
 
+    globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx, cy, cz), cx, cy, cz);
+
+
+    if (lx == 0)  globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx-1, cy, cz), cx-1, cy, cz);
+    if (lx == 15) globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx+1, cy, cz), cx+1, cy, cz);
+    if (ly == 0)  globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx, cy-1, cz), cx, cy-1, cz);
+    if (ly == 15) globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx, cy+1, cz), cx, cy+1, cz);
+    if (lz == 0) globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx, cy, cz-1), cx, cy, cz-1);
+    if (lz == 15) globalVulkanApp->UpdateSingleChunk(NF::Core::GetChunkHash(cx, cy, cz+1), cx, cy, cz+1);
+
     std::cout << "[Fizika] Blokk Kitorve! Koordinata: X:" << gx << " Y:" << gy << " Z:" << gz << "\n";
     if (globalVulkanApp) globalVulkanApp->UpdateSingleChunk(hash, cx, cy, cz);
 }

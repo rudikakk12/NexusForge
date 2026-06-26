@@ -24,6 +24,7 @@ namespace NF::Render {
         VkSampler textureSampler = VK_NULL_HANDLE;
 
         void LoadBlockTextures(VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue graphicsQueue, const std::string& folderPath) {
+            std::cout << "[DEBUG] Probálom betölteni a textúrákat innen: " << folderPath << std::endl;
             const int texWidth = 32;
             const int texHeight = 32;
             const uint32_t layerCount = 256;
@@ -63,6 +64,7 @@ namespace NF::Render {
                 VkDeviceSize offset = i * layerSize;
 
                 if (!pixels) {
+                    std::cerr << "[DEBUG] NEM TALÁLOM A FÁJLT: " << filePath << std::endl;
                     // Klasszikus 8x8-as sűrűbb sakktábla generálása
                     std::vector<uint8_t> fallback(layerSize, 0);
                     for(int y = 0; y < texHeight; y++) {

@@ -353,7 +353,7 @@ void initVulkan() {
             initImGui();
 
             // 2. Textúrák
-            textureManager.LoadBlockTextures(device, physicalDevice, commandPool, graphicsQueue, "../Assets/Textures/Blocks");
+            textureManager.LoadBlockTextures(device, physicalDevice, commandPool, graphicsQueue, "Assets/Textures/Blocks");
 
             // 3. Descriptor Set lefoglalása a SAJÁT poolból
             VkDescriptorSetAllocateInfo allocInfo{};
