@@ -39,6 +39,7 @@
 #include "CameraMath.hpp"
 #include "VulkanMegaArena.hpp"
 #include "TelemetryHUD.hpp"
+#include "TextureManager.hpp"
 #include "../Core/Physics.hpp"
 #include "../Core/World.hpp"
 #include "../Core/WorldGeneration.hpp" // <-- BEKÖTVE A GENERÁTOR
@@ -183,6 +184,11 @@ namespace NF::Render {
         std::vector<MeshJob> pendingMeshJobs;
         std::unordered_set<uint64_t> dispatchedMeshes; // Ez szigorúan csak a főszálon él!
 
+        // EZ A HÁROM SOR HIÁNYZIK VAGY CSONKA NÁLAD:
+        NF::Render::TextureManager textureManager;
+        VkDescriptorSet mainDescriptorSet;
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE; // <--- EZT KERESI A FORDÍTÓ!
+
         void initWindow() {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -256,10 +262,25 @@ namespace NF::Render {
         }
 
         void createGraphicsPipeline() {
-            auto vertCode = NF::Render::VulkanRenderer::ReadFile("vert.spv"); auto fragCode = NF::Render::VulkanRenderer::ReadFile("frag.spv");
-            VkShaderModule vertShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, vertCode); VkShaderModule fragShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, fragCode);
-            graphicsPipeline = NF::Render::VulkanRenderer::CreateGraphicsPipeline(device, swapChainExtent, renderPass, pipelineLayout, vertShaderModule, fragShaderModule);
-            vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
+            auto vertCode = NF::Render::VulkanRenderer::ReadFile("vert.spv");
+            auto fragCode = NF::Render::VulkanRenderer::ReadFile("frag.spv");
+
+            VkShaderModule vertShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, vertCode);
+            VkShaderModule fragShaderModule = NF::Render::VulkanRenderer::CreateShaderModule(device, fragCode);
+
+            // JAVÍTVA: Itt adjuk át 7. paraméterként a descriptorSetLayout-ot!
+            graphicsPipeline = NF::Render::VulkanRenderer::CreateGraphicsPipeline(
+                device,
+                swapChainExtent,
+                renderPass,
+                pipelineLayout,
+                vertShaderModule,
+                fragShaderModule,
+                descriptorSetLayout // <--- EZ HIÁNYZOTT!
+            );
+
+            vkDestroyShaderModule(device, fragShaderModule, nullptr);
+            vkDestroyShaderModule(device, vertShaderModule, nullptr);
         }
 
         void createCommandPool() { commandPool = NF::Render::CommandManager::CreateCommandPool(device, 0); }

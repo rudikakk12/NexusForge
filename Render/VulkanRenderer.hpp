@@ -46,10 +46,11 @@ namespace NF::Render {
             return shaderModule;
         }
 
-        // Fő grafikus pipeline létrehozó (Z-BUFFERREL BEKÖTVE)
+        // Fő grafikus pipeline létrehozó (Z-BUFFERREL ÉS TEXTÚRA DESCRIPTORRAL BEKÖTVE)
         static VkPipeline CreateGraphicsPipeline(VkDevice device, VkExtent2D extent, VkRenderPass renderPass,
                                                  VkPipelineLayout& pipelineLayout,
-                                                 VkShaderModule vertShader, VkShaderModule fragShader) {
+                                                 VkShaderModule vertShader, VkShaderModule fragShader,
+                                                 VkDescriptorSetLayout descriptorSetLayout) {
 
             VkPipelineShaderStageCreateInfo vertStage{};
             vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -124,12 +125,12 @@ namespace NF::Render {
             colorBlending.attachmentCount = 1;
             colorBlending.pAttachments = &colorBlendAttachment;
 
-            // --- ÚJ: MÉLYSÉGTESZT (Z-BUFFER) BEÁLLÍTÁSAI ---
+            // --- MÉLYSÉGTESZT (Z-BUFFER) BEÁLLÍTÁSAI ---
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_TRUE;            // Igen, ellenőrizzük a távolságot!
-            depthStencil.depthWriteEnable = VK_TRUE;           // Igen, mentsük el az új távolságot!
-            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;  // A kisebb Z érték (közelebbi) takarja a nagyobbat
+            depthStencil.depthTestEnable = VK_TRUE;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -141,6 +142,8 @@ namespace NF::Render {
 
             VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
             pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = 1;                     // ÚJ: A Descriptor Set Layout bekapcsolása
+            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;     // ÚJ: Textúra Array Layout átadása
             pipelineLayoutInfo.pushConstantRangeCount = 1;
             pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -158,7 +161,7 @@ namespace NF::Render {
             pipelineInfo.pViewportState = &viewportState;
             pipelineInfo.pRasterizationState = &rasterizer;
             pipelineInfo.pMultisampleState = &multisampling;
-            pipelineInfo.pDepthStencilState = &depthStencil; // <--- ITT KERÜL BE A RENDSZERBE A Z-BUFFER!
+            pipelineInfo.pDepthStencilState = &depthStencil;
             pipelineInfo.pColorBlendState = &colorBlending;
             pipelineInfo.layout = pipelineLayout;
             pipelineInfo.renderPass = renderPass;

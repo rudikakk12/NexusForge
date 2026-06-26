@@ -1,3 +1,7 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include "libs/stb_image.h" // Vagy ahogy pontosan nálad van
+#undef STB_IMAGE_IMPLEMENTATION // <--- EZ AZ A SOR AMI MEGOLDJA A REDEFINITION HIBÁKAT!
+
 #include <cstdint>
 #include <vector>
 #include <iostream>

@@ -45,6 +45,8 @@ set(IMGUI_SOURCES
         Core/Physics.hpp
         Core/Physics.hpp
         Render/VulkanMegaArena.hpp
+        libs/stb_image.h
+        libs/stb_image.h
 )
 
 # ==============================================================================
