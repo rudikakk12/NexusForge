@@ -189,6 +189,8 @@ namespace NF::Render {
         VkDescriptorSet mainDescriptorSet;
         VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE; // <--- EZT KERESI A FORDÍTÓ!
 
+        VkDescriptorPool engineDescriptorPool = VK_NULL_HANDLE; // <-- Ez a tiéd!
+
         void initWindow() {
             if (!glfwInit()) throw std::runtime_error("GLFW init hiba!");
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -306,17 +308,79 @@ namespace NF::Render {
             ImGui_ImplVulkan_Init(&init_info);
         }
 
-        void initVulkan() {
+        void createDescriptorSetLayout() {
+            // 1. Textúra sampler binding (kell a shadernek: layout(binding = 1))
+            VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+            samplerLayoutBinding.binding = 1;
+            samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            samplerLayoutBinding.descriptorCount = 1;
+            samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            samplerLayoutBinding.pImmutableSamplers = nullptr;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = 1;
+            layoutInfo.pBindings = &samplerLayoutBinding;
+
+            // Itt jön létre a descriptorSetLayout, ami eddig hiányzott
+            if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+                throw std::runtime_error("Kritikus hiba: DescriptorSetLayout létrehozása meghiúsult!");
+            }
+        }
+
+void initVulkan() {
             createInstance(); createSurface(); pickPhysicalDevice(); createLogicalDevice(); createSwapChain(); createImageViews();
-            createRenderPass(); createDepthResources(); createFramebuffers(); createGraphicsPipeline(); createCommandPool(); createCommandBuffers(); createSyncObjects();
+            createRenderPass();
+            createDescriptorSetLayout();
+            createDepthResources(); createFramebuffers();
+            createGraphicsPipeline();
+            createCommandPool(); createCommandBuffers(); createSyncObjects();
+
+            // 1. Saját Descriptor Pool létrehozása (NEM az ImGui-é!)
+            VkDescriptorPoolSize pool_sizes[] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = pool_sizes;
+            poolInfo.maxSets = 1;
+            vkCreateDescriptorPool(device, &poolInfo, nullptr, &engineDescriptorPool);
 
             megaArena.Initialize(device, physicalDevice);
             cullArray.reserve(300000);
-
             masterCommands.resize(megaArena.MAX_COMMANDS);
             visibleCommands.reserve(300000);
 
             initImGui();
+
+            // 2. Textúrák
+            textureManager.LoadBlockTextures(device, physicalDevice, commandPool, graphicsQueue, "../Assets/Textures/Blocks");
+
+            // 3. Descriptor Set lefoglalása a SAJÁT poolból
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = engineDescriptorPool; // <-- SAJÁT POOL!
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &descriptorSetLayout;
+
+            if (vkAllocateDescriptorSets(device, &allocInfo, &mainDescriptorSet) != VK_SUCCESS) {
+                throw std::runtime_error("Textura Descriptor Set lefoglalasa sikertelen!");
+            }
+
+            VkDescriptorImageInfo imageInfo{};
+            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfo.imageView = textureManager.textureArrayView;
+            imageInfo.sampler = textureManager.textureSampler;
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = mainDescriptorSet;
+            descriptorWrite.dstBinding = 1;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pImageInfo = &imageInfo;
+
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 
             workerThread = std::thread(&VulkanCore::AsyncChunkWorker, this);
             std::cout << "[Vulkan] Motor inicializalva! Okos Yield & Dense MDI aktiv." << std::endl;
@@ -814,7 +878,12 @@ void ProcessTaskQueues() {
             std::array<VkClearValue, 2> clearValues{}; clearValues[0].color = VkClearColorValue{0.05f, 0.6f, 0.8f, 1.0f}; clearValues[1].depthStencil = VkClearDepthStencilValue{1.0f, 0};
             renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size()); renderPassInfo.pClearValues = clearValues.data();
             vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+            // A drawFrame() függvény belsejében, a vkCmdBindPipeline után:
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+            // --- EZ A SOR A KULCS! ---
+            // A mainDescriptorSet-et kell ide átadnod, ami a TextureArray-t tartalmazza.
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &mainDescriptorSet, 0, nullptr);
 
             Mat4 view = Mat4::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
             Mat4 proj = Mat4::perspective(45.0f * (M_PI / 180.0f), (float)WIDTH / (float)HEIGHT, 0.1f, 1000.0f);

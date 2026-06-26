@@ -9,13 +9,6 @@ layout(binding = 1) uniform sampler2DArray blockTextures;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // 1. DETEKTÍV TESZT: Ha a GPU 0-t kapott ID-ként (Levegő), fessük be VÖRÖSRE,
-    // hogy lássuk a geometriát, ahelyett hogy eldobnánk a semmibe!
-    if (fragBlockID == 0) {
-        outColor = vec4(1.0, 0.0, 0.0, 1.0); // VÖRÖS: Adat-híd (Memória formátum) hiba a BasicMesher-ben!
-        return;
-    }
-
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
     float diff = max(dot(fragNormal, lightDir), 0.2);
 
@@ -28,14 +21,20 @@ void main() {
         uv = fragPos.xy;
     }
 
-    vec4 texColor = texture(blockTextures, vec3(uv.x, uv.y, float(fragBlockID)));
+    // A réteg index explicit konverziója (a Garbage ID-k elkerülésére)
+    float layerIndex = float(fragBlockID);
+    vec4 texColor = texture(blockTextures, vec3(uv.x, uv.y, layerIndex));
 
-    // 2. DETEKTÍV TESZT: Ha a textúra betöltő/fallback rossz volt és tényleg 0 az alpha
+    // HA A TEXTÚRA ÜRES VAGY AZ ID HIBÁS: Jöhet a Procedurális Lila-Fekete Sakktábla!
     if (texColor.a < 0.1) {
-        outColor = vec4(1.0, 0.0, 1.0, 1.0); // MAGENTA: A textúra a VRAM-ban üres vagy átlátszó!
+        // 4x4-es sűrű rács generálása a textúra UV koordinátáiból
+        bool isMagenta = (int(floor(uv.x * 4.0)) + int(floor(uv.y * 4.0))) % 2 == 0;
+        vec3 fallbackColor = isMagenta ? vec3(1.0, 0.0, 1.0) : vec3(0.0, 0.0, 0.0);
+
+        outColor = vec4(fallbackColor * diff, 1.0);
         return;
     }
 
-    // Ha idáig eljutott, minden tökéletes:
+    // Ha megvan a PNG a VRAM-ban, akkor kirajzolja azt!
     outColor = vec4(texColor.rgb * diff, 1.0);
 }
